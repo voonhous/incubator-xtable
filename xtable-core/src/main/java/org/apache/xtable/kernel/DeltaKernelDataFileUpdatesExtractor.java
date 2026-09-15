@@ -47,6 +47,7 @@ import io.delta.kernel.types.StructType;
 
 import org.apache.xtable.collectors.CustomCollectors;
 import org.apache.xtable.delta.DeltaPathUtils;
+import org.apache.xtable.exception.NotSupportedException;
 import org.apache.xtable.exception.ReadException;
 import org.apache.xtable.model.schema.InternalField;
 import org.apache.xtable.model.schema.InternalSchema;
@@ -297,6 +298,9 @@ public class DeltaKernelDataFileUpdatesExtractor {
     InternalType dataType = fieldSchema.getDataType();
 
     switch (dataType) {
+      case VARIANT:
+        throw new NotSupportedException(
+            "Variant column statistics cannot be converted to Delta Kernel literals");
       case BOOLEAN:
         return Literal.ofBoolean((Boolean) value);
       case INT:
