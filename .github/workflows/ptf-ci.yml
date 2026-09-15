@@ -77,11 +77,13 @@ jobs:
         if: steps.hudi-cache.outputs.cache-hit != 'true'
         env:
           JAVA_HOME: ${{ env.JAVA_HOME_11_X64 }}
+        # cloned outside the workspace so the Apache RAT check of this project does not scan it
         run: |
-          git init --quiet hudi
-          git -C hudi fetch --quiet --depth 1 "$HUDI_REPOSITORY" "$HUDI_COMMIT"
-          git -C hudi checkout --quiet FETCH_HEAD
-          mvn $PTF_MAVEN_ARGS -f hudi/pom.xml install -DskipTests -Dscala-2.12 -Dspark3.4 \
+          HUDI_DIR="$RUNNER_TEMP/hudi"
+          git init --quiet "$HUDI_DIR"
+          git -C "$HUDI_DIR" fetch --quiet --depth 1 "$HUDI_REPOSITORY" "$HUDI_COMMIT"
+          git -C "$HUDI_DIR" checkout --quiet FETCH_HEAD
+          mvn $PTF_MAVEN_ARGS -f "$HUDI_DIR/pom.xml" install -DskipTests -Dscala-2.12 -Dspark3.4 \
             -pl packaging/hudi-spark-bundle,hudi-utilities,hudi-client/hudi-java-client -am
 
       - name: Build the modules the Iceberg table format depends on
