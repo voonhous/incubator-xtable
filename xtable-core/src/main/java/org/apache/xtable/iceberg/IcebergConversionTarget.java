@@ -272,6 +272,11 @@ public class IcebergConversionTarget implements ConversionTarget {
       createAndSetNameMapping(transaction.table().schema());
     }
     if (!transaction.table().schema().sameSchema(latestSchema)) {
+      int formatVersion = TableUtil.formatVersion(table);
+      IcebergVariantSupport.requireFormatVersion(
+          latestSchema,
+          formatVersion,
+          String.format("table %s is at format version %d", basePath, formatVersion));
       boolean hasFieldIds =
           schema.getAllFields().stream().anyMatch(field -> field.getFieldId() != null);
       if (hasFieldIds) {

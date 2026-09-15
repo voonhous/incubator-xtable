@@ -85,6 +85,12 @@ public class SparkSchemaExtractor {
         int scale =
             (int) field.getSchema().getMetadata().get(InternalSchema.MetadataKey.DECIMAL_SCALE);
         return DataTypes.createDecimalType(precision, scale);
+      case VARIANT:
+        throw new NotSupportedException(
+            String.format(
+                "Variant column %s cannot be represented as a Spark type; variant columns are only"
+                    + " supported when syncing to Iceberg",
+                field.getPath()));
       case RECORD:
         return fromInternalSchema(field.getSchema());
       case MAP:

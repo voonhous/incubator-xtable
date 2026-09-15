@@ -139,6 +139,9 @@ public class XTableValueMetadata {
         } else {
           return ValueType.LOCAL_TIMESTAMP_MILLIS;
         }
+      case VARIANT:
+        throw new UnsupportedOperationException(
+            "Variant columns have no column statistics in Hudi");
       default:
         throw new UnsupportedOperationException(
             "InternalType " + internalSchema.getDataType() + " is not supported");
