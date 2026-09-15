@@ -50,7 +50,7 @@ import org.apache.hudi.client.HoodieJavaWriteClient;
 import org.apache.hudi.client.WriteStatus;
 import org.apache.hudi.client.common.HoodieJavaEngineContext;
 import org.apache.hudi.client.timeline.HoodieTimelineArchiver;
-import org.apache.hudi.client.timeline.versioning.v1.TimelineArchiverV1;
+import org.apache.hudi.client.timeline.TimelineArchiverV1;
 import org.apache.hudi.common.HoodieCleanStat;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.engine.HoodieEngineContext;
@@ -572,14 +572,15 @@ public class HudiConversionTarget implements ConversionTarget {
                           entry.getValue().stream()
                               .map(HoodieCleanFileInfo::getFilePath)
                               .collect(Collectors.toList());
-                      return new HoodieCleanStat(
-                          HoodieCleaningPolicy.KEEP_LATEST_COMMITS,
-                          partitionPath,
-                          deletePaths,
-                          deletePaths,
-                          Collections.emptyList(),
-                          earliestInstant.get().requestedTime(),
-                          instantTime);
+                      return HoodieCleanStat.builder()
+                          .withPolicy(HoodieCleaningPolicy.KEEP_LATEST_COMMITS)
+                          .withPartitionPath(partitionPath)
+                          .withDeletePathPatterns(deletePaths)
+                          .withSuccessDeleteFiles(deletePaths)
+                          .withFailedDeleteFiles(Collections.emptyList())
+                          .withEarliestCommitToRetain(earliestInstant.get().requestedTime())
+                          .withLastCompletedCommitTimestamp(instantTime)
+                          .build();
                     })
                 .collect(Collectors.toList());
         HoodieCleanMetadata cleanMetadata =

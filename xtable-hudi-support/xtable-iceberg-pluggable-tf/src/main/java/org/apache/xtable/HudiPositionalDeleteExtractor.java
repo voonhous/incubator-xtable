@@ -24,8 +24,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import org.roaringbitmap.longlong.Roaring64NavigableMap;
-
 import org.apache.hudi.common.fs.FSUtils;
 import org.apache.hudi.common.model.HoodieBaseFile;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
@@ -98,8 +96,7 @@ class HudiPositionalDeleteExtractor {
       HoodieSchema schema,
       SyncableFileSystemView fsView,
       Map<String, List<Long>> positionsByDataFile) {
-    try (HoodieLogFormat.Reader reader =
-        HoodieLogFormat.newReader(metaClient.getStorage(), logFile, schema)) {
+    try (HoodieLogFormat.Reader reader = HoodieLogFormat.newReader(metaClient, logFile, schema)) {
       while (reader.hasNext()) {
         HoodieLogBlock block = reader.next();
         if (!(block instanceof HoodieDeleteBlock)) {
@@ -111,9 +108,9 @@ class HudiPositionalDeleteExtractor {
                   + logFile.getPath());
         }
         HoodieDeleteBlock deleteBlock = (HoodieDeleteBlock) block;
-        Roaring64NavigableMap positions = deleteBlock.getRecordPositions();
+        List<Long> positions = deleteBlock.getRecordPositionList();
         int deleteCount = deleteBlock.getRecordsToDelete().length;
-        if (positions == null || positions.getLongCardinality() != deleteCount) {
+        if (positions == null || positions.size() != deleteCount) {
           throw new NotSupportedException(
               "Delete blocks must carry one valid record position per deleted record to be "
                   + "represented as an Iceberg deletion vector: "
