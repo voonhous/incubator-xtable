@@ -1,0 +1,123 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+# The pluggable-table-format branches build against a Hudi commit that is not published to any
+# Maven repository, so the regular Maven CI Build (main only, JDK 11) cannot run for them. This
+# workflow builds that Hudi commit first (cached by commit id), then builds and tests the modules
+# the Iceberg table format depends on with the JDK that Iceberg 1.11 requires.
+name: Pluggable Table Format CI
+
+on:
+  push:
+    branches:
+      - "iceberg-v3-ptf-*"
+  pull_request:
+    branches:
+      - "iceberg-v3-ptf-*"
+  workflow_dispatch:
+
+concurrency:
+  group: ptf-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HUDI_REPOSITORY: https://github.com/apache/hudi.git
+  # apache/hudi master as of 2026-09-11; hudi.version in pom.xml (1.3.0-SNAPSHOT) is built from it
+  HUDI_COMMIT: 1d3a0affad873868e74df7207013ae8eeb4dbb8c
+  MAVEN_OPTS: -Xmx4g -Xss4m
+  PTF_MAVEN_ARGS: -B -ntp -Dmaven.build.cache.enabled=false
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDK 11 (Hudi build) and JDK 17 (XTable)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: |
+            11
+            17
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            !~/.m2/repository/org/apache/hudi
+          key: ptf-m2-${{ runner.os }}-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ptf-m2-${{ runner.os }}-
+
+      - name: Cache the Hudi build
+        id: hudi-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/apache/hudi
+          key: ptf-hudi-${{ runner.os }}-${{ env.HUDI_COMMIT }}-spark3.4-scala2.12
+
+      - name: Build Hudi at ${{ env.HUDI_COMMIT }} (Spark 3.4, Scala 2.12)
+        if: steps.hudi-cache.outputs.cache-hit != 'true'
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME_11_X64 }}
+        run: |
+          git init --quiet hudi
+          git -C hudi fetch --quiet --depth 1 "$HUDI_REPOSITORY" "$HUDI_COMMIT"
+          git -C hudi checkout --quiet FETCH_HEAD
+          mvn $PTF_MAVEN_ARGS -f hudi/pom.xml install -DskipTests -Dscala-2.12 -Dspark3.4 \
+            -pl packaging/hudi-spark-bundle,hudi-utilities,hudi-client/hudi-java-client -am
+
+      - name: Build the modules the Iceberg table format depends on
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
+        run: ./mvnw $PTF_MAVEN_ARGS install -DskipTests -pl xtable-hudi-support/xtable-iceberg-pluggable-tf -am
+
+      - name: Unit tests
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
+        run: ./mvnw $PTF_MAVEN_ARGS test -pl xtable-api,xtable-hudi-support/xtable-hudi-support-utils,xtable-core
+
+      - name: Iceberg table format tests
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
+        # The merge-on-read deletion-vector tests need the update-as-delete-insert writer mode,
+        # which apache/hudi master does not have; they run separately below.
+        run: |
+          ./mvnw $PTF_MAVEN_ARGS verify -pl xtable-hudi-support/xtable-iceberg-pluggable-tf \
+            -Dit.test='!ITIcebergMergeOnReadDeletionVectors,!ITIcebergMorDvTableServices,!ITIcebergSparkMergeOnReadDeletionVectors'
+
+      - name: Merge-on-read deletion-vector tests (expected to fail on apache/hudi master)
+        continue-on-error: true
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
+        run: |
+          ./mvnw $PTF_MAVEN_ARGS verify -pl xtable-hudi-support/xtable-iceberg-pluggable-tf \
+            -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false -DfailIfNoTests=false \
+            -Dit.test='ITIcebergMergeOnReadDeletionVectors,ITIcebergMorDvTableServices,ITIcebergSparkMergeOnReadDeletionVectors'
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            **/target/surefire-reports/**
+            **/target/failsafe-reports/**
+          if-no-files-found: ignore
