@@ -81,6 +81,14 @@ public class IcebergTableManager {
       return getTable(catalogConfig, tableIdentifier, basePath);
     } else {
       try {
+        int formatVersion =
+            hadoopConfiguration.getInt(ICEBERG_FORMAT_VERSION, DEFAULT_ICEBERG_FORMAT_VERSION);
+        IcebergVariantSupport.requireFormatVersion(
+            schema,
+            formatVersion,
+            String.format(
+                "the table would be created at format version %d; set %s=%d",
+                formatVersion, ICEBERG_FORMAT_VERSION, IcebergVariantSupport.MIN_FORMAT_VERSION));
         // initialize the table with an empty schema, then manually set the schema to prevent the
         // Iceberg API from remapping the field IDs.
         Table tableWithEmptySchema =
@@ -105,12 +113,12 @@ public class IcebergTableManager {
         TableOperations operations = ((BaseTable) tableWithEmptySchema).operations();
         TableMetadata tableMetadata = operations.current();
         TableMetadata.Builder builder = TableMetadata.buildFrom(tableMetadata);
+        // upgradeFormatVersion never downgrades, so requesting the default (or lower) is a no-op.
+        // It must precede setCurrentSchema: Iceberg validates the schema against the builder's
+        // format version, and types such as variant are only legal from v3.
+        builder.upgradeFormatVersion(formatVersion);
         builder.setCurrentSchema(schema, schema.highestFieldId());
         builder.setDefaultPartitionSpec(partitionSpec);
-        int formatVersion =
-            hadoopConfiguration.getInt(ICEBERG_FORMAT_VERSION, DEFAULT_ICEBERG_FORMAT_VERSION);
-        // upgradeFormatVersion never downgrades, so requesting the default (or lower) is a no-op.
-        builder.upgradeFormatVersion(formatVersion);
         operations.commit(tableMetadata, builder.build());
         return getTable(catalogConfig, tableIdentifier, basePath);
       } catch (AlreadyExistsException ex) {

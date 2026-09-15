@@ -39,6 +39,7 @@ import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
+import org.apache.iceberg.TableUtil;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.UpdateProperties;
 import org.apache.iceberg.catalog.Namespace;
@@ -219,6 +220,11 @@ public class IcebergConversionTarget implements ConversionTarget {
       createAndSetNameMapping(latestSchema);
     }
     if (!transaction.table().schema().sameSchema(latestSchema)) {
+      int formatVersion = TableUtil.formatVersion(table);
+      IcebergVariantSupport.requireFormatVersion(
+          latestSchema,
+          formatVersion,
+          String.format("table %s is at format version %d", basePath, formatVersion));
       boolean hasFieldIds =
           schema.getAllFields().stream().anyMatch(field -> field.getFieldId() != null);
       if (hasFieldIds) {

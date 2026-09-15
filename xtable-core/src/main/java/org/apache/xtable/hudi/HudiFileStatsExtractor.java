@@ -221,6 +221,8 @@ public class HudiFileStatsExtractor {
             HoodieTableMetadataUtil.PARTITION_NAME_COLUMN_STATS, metaClient);
     List<String> columnNames =
         nameFieldMap.entrySet().stream()
+            // variant columns have no usable min/max statistics
+            .filter(e -> e.getValue().getSchema().getDataType() != InternalType.VARIANT)
             .filter(
                 e ->
                     HoodieTableMetadataUtil.isColumnTypeSupported(

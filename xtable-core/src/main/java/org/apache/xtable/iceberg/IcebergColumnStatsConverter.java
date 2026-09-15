@@ -67,6 +67,11 @@ public class IcebergColumnStatsConverter {
           valueCounts.put(fieldId, columnStats.getNumValues());
           nullValueCounts.put(fieldId, columnStats.getNumNulls());
           Type fieldType = icebergField.type();
+          if (fieldType.typeId() == Type.TypeID.VARIANT) {
+            // Iceberg keeps no lower or upper bounds for variant columns: the encoded bytes have
+            // no ordering, so only the counts above are recorded for them.
+            return;
+          }
           if (columnStats.getRange().getMinValue() != null) {
             lowerBounds.put(
                 fieldId, Conversions.toByteBuffer(fieldType, columnStats.getRange().getMinValue()));
@@ -120,7 +125,7 @@ public class IcebergColumnStatsConverter {
   }
 
   private Object convertFromIcebergValue(Type fieldType, ByteBuffer value) {
-    if (value == null) {
+    if (value == null || fieldType.typeId() == Type.TypeID.VARIANT) {
       return null;
     }
     Object convertedValue = Conversions.fromByteBuffer(fieldType, value);

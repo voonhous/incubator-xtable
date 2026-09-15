@@ -41,6 +41,7 @@ import org.apache.xtable.exception.PartitionSpecException;
 import org.apache.xtable.model.schema.InternalField;
 import org.apache.xtable.model.schema.InternalPartitionField;
 import org.apache.xtable.model.schema.InternalSchema;
+import org.apache.xtable.model.schema.InternalType;
 import org.apache.xtable.model.schema.PartitionTransformType;
 import org.apache.xtable.schema.SchemaFieldFinder;
 
@@ -61,6 +62,13 @@ public class IcebergPartitionSpecExtractor {
     PartitionSpec.Builder partitionSpecBuilder = PartitionSpec.builderFor(tableSchema);
     for (InternalPartitionField partitioningField : partitionFields) {
       String fieldPath = partitioningField.getSourceField().getPath();
+      if (partitioningField.getSourceField().getSchema().getDataType() == InternalType.VARIANT) {
+        throw new NotSupportedException(
+            String.format(
+                "Cannot partition an Iceberg table by variant column %s: the Iceberg specification"
+                    + " defines no partition transform for variant (requested %s)",
+                fieldPath, partitioningField.getTransformType()));
+      }
       switch (partitioningField.getTransformType()) {
         case YEAR:
           partitionSpecBuilder.year(fieldPath);

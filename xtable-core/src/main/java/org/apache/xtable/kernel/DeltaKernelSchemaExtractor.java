@@ -304,6 +304,12 @@ public class DeltaKernelSchemaExtractor {
         int precision = ((Number) precisionObj).intValue();
         int scale = ((Number) scaleObj).intValue();
         return new DecimalType(precision, scale);
+      case VARIANT:
+        throw new NotSupportedException(
+            String.format(
+                "Variant column %s cannot be represented as a Delta Kernel type; variant columns are"
+                    + " only supported when syncing to Iceberg",
+                field.getPath()));
       case RECORD:
         return fromInternalSchema(field.getSchema());
       case MAP:

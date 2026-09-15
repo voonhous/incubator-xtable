@@ -36,6 +36,7 @@ import org.apache.avro.LogicalTypes;
 import org.apache.avro.Schema;
 
 import org.apache.xtable.collectors.CustomCollectors;
+import org.apache.xtable.exception.NotSupportedException;
 import org.apache.xtable.exception.SchemaExtractorException;
 import org.apache.xtable.exception.UnsupportedSchemaTypeException;
 import org.apache.xtable.hudi.idtracking.IdTracker;
@@ -52,6 +53,13 @@ import org.apache.xtable.schema.SchemaUtils;
  */
 @NoArgsConstructor(access = AccessLevel.PRIVATE)
 public class AvroSchemaConverter {
+  private static final String LOGICAL_TYPE_PROP = "logicalType";
+  /** Avro logical type Hudi stamps on the record that carries a variant column. */
+  static final String VARIANT_LOGICAL_TYPE = "variant";
+
+  static final String VARIANT_METADATA_FIELD = "metadata";
+  static final String VARIANT_VALUE_FIELD = "value";
+  static final String VARIANT_TYPED_VALUE_FIELD = "typed_value";
   // avro only supports string keys in maps
   private static final InternalField MAP_KEY_FIELD =
       InternalField.builder()
@@ -183,6 +191,9 @@ public class AvroSchemaConverter {
         newDataType = InternalType.NULL;
         break;
       case RECORD:
+        if (VARIANT_LOGICAL_TYPE.equals(schema.getProp(LOGICAL_TYPE_PROP))) {
+          return toVariantSchema(schema);
+        }
         List<InternalField> subFields = new ArrayList<>(schema.getFields().size());
         for (Schema.Field avroField : schema.getFields()) {
           IdMapping idMapping = fieldNameToIdMapping.get(avroField.name());
@@ -326,8 +337,72 @@ public class AvroSchemaConverter {
    *     string. This is used for the avro namespace to guarantee unique names for nested records.
    * @return an Avro schema
    */
+  /**
+   * Converts a Hudi variant column. It reaches XTable as an Avro record carrying the {@code
+   * variant} logical type whose fields are the {@code metadata} and {@code value} binaries of the
+   * Parquet variant encoding. The logical type identifies the column; an ordinary record that
+   * happens to have two binary fields with those names stays a record.
+   */
+  private InternalSchema toVariantSchema(Schema schema) {
+    if (schema.getField(VARIANT_TYPED_VALUE_FIELD) != null) {
+      throw new NotSupportedException(
+          String.format(
+              "Shredded variant schema %s (with a %s component) is not supported",
+              schema.getFullName(), VARIANT_TYPED_VALUE_FIELD));
+    }
+    if (schema.getFields().size() != 2
+        || !isBytesField(schema.getField(VARIANT_METADATA_FIELD))
+        || !isBytesField(schema.getField(VARIANT_VALUE_FIELD))) {
+      throw new SchemaExtractorException(
+          String.format(
+              "Invalid variant schema %s: expected exactly the binary components %s and %s but found %s",
+              schema.getFullName(),
+              VARIANT_METADATA_FIELD,
+              VARIANT_VALUE_FIELD,
+              schema.getFields().stream().map(Schema.Field::name).collect(Collectors.toList())));
+    }
+    return InternalSchema.builder()
+        .name(schema.getName())
+        .comment(schema.getDoc())
+        .dataType(InternalType.VARIANT)
+        .isNullable(schema.isNullable())
+        .build();
+  }
+
+  private static boolean isBytesField(Schema.Field field) {
+    return field != null && field.schema().getType() == Schema.Type.BYTES;
+  }
+
+  /** The Avro form of a variant column, mirroring the schema Hudi produces for one. */
+  private static Schema variantAvroSchema(InternalSchema internalSchema, String currentPath) {
+    List<Schema.Field> components = new ArrayList<>(2);
+    components.add(
+        new Schema.Field(
+            VARIANT_METADATA_FIELD,
+            Schema.create(Schema.Type.BYTES),
+            "Variant metadata component",
+            null));
+    components.add(
+        new Schema.Field(
+            VARIANT_VALUE_FIELD,
+            Schema.create(Schema.Type.BYTES),
+            "Variant value component",
+            null));
+    Schema variant =
+        Schema.createRecord(
+            internalSchema.getName() == null ? VARIANT_LOGICAL_TYPE : internalSchema.getName(),
+            internalSchema.getComment(),
+            currentPath,
+            false,
+            components);
+    variant.addProp(LOGICAL_TYPE_PROP, VARIANT_LOGICAL_TYPE);
+    return variant;
+  }
+
   private Schema fromInternalSchema(InternalSchema internalSchema, String currentPath) {
     switch (internalSchema.getDataType()) {
+      case VARIANT:
+        return finalizeSchema(variantAvroSchema(internalSchema, currentPath), internalSchema);
       case RECORD:
         List<Schema.Field> fields =
             internalSchema.getFields().stream()
