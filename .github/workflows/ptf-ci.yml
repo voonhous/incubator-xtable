@@ -14,11 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
-# The pluggable-table-format branches build against a Hudi commit that is not published to any
-# Maven repository, so the regular Maven CI Build (main only, JDK 11) cannot run for them. This
-# workflow builds that Hudi commit first (cached by commit id), then builds and tests the modules
-# the Iceberg table format depends on with the JDK that Iceberg 1.11 requires.
 name: Pluggable Table Format CI
 
 on:
