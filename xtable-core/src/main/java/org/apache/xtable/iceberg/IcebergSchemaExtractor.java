@@ -277,7 +277,9 @@ public class IcebergSchemaExtractor {
         int keyId = key.getFieldId() == null ? fieldIdTracker.incrementAndGet() : key.getFieldId();
         int valueId =
             value.getFieldId() == null ? fieldIdTracker.incrementAndGet() : value.getFieldId();
-        if (field.getSchema().isNullable()) {
+        // whether the values may be null is a property of the value, not of the map: a required
+        // map can hold null values
+        if (value.getSchema().isNullable()) {
           return Types.MapType.ofOptional(
               keyId,
               valueId,
@@ -301,7 +303,8 @@ public class IcebergSchemaExtractor {
                 .orElseThrow(() -> new SchemaExtractorException("Invalid array schema"));
         int elementId =
             element.getFieldId() == null ? fieldIdTracker.incrementAndGet() : element.getFieldId();
-        if (field.getSchema().isNullable()) {
+        // likewise, whether elements may be null is a property of the element, not of the list
+        if (element.getSchema().isNullable()) {
           return Types.ListType.ofOptional(elementId, toIcebergType(element, fieldIdTracker));
         } else {
           return Types.ListType.ofRequired(elementId, toIcebergType(element, fieldIdTracker));

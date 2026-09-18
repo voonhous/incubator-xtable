@@ -712,6 +712,106 @@ public class TestIcebergSchemaExtractor {
     assertEquals(internalSchema, SCHEMA_EXTRACTOR.fromIceberg(icebergRepresentation));
   }
 
+  /**
+   * Whether a map's values or a list's elements may be null is independent of whether the map or
+   * list itself may be null. A required map holding null values must not become a map with required
+   * values in Iceberg: readers that trust the schema would then fail or answer wrongly.
+   */
+  @Test
+  public void testContainerAndContentNullabilityAreIndependent() {
+    InternalSchema intSchema =
+        InternalSchema.builder().name("int").dataType(InternalType.INT).isNullable(false).build();
+    InternalSchema nullableInt = intSchema.toBuilder().isNullable(true).build();
+    InternalSchema stringKey =
+        InternalSchema.builder().name("string").dataType(InternalType.STRING).build();
+    InternalSchema internalSchema =
+        InternalSchema.builder()
+            .name("record")
+            .dataType(InternalType.RECORD)
+            .fields(
+                Arrays.asList(
+                    InternalField.builder()
+                        .name("requiredMapNullableValues")
+                        .fieldId(1)
+                        .schema(map(false, stringKey, nullableInt, 5, 6))
+                        .build(),
+                    InternalField.builder()
+                        .name("optionalMapRequiredValues")
+                        .fieldId(2)
+                        .schema(map(true, stringKey, intSchema, 7, 8))
+                        .defaultValue(InternalField.Constants.NULL_DEFAULT_VALUE)
+                        .build(),
+                    InternalField.builder()
+                        .name("requiredListNullableElements")
+                        .fieldId(3)
+                        .schema(list(false, nullableInt, 9))
+                        .build(),
+                    InternalField.builder()
+                        .name("optionalListRequiredElements")
+                        .fieldId(4)
+                        .schema(list(true, intSchema, 10))
+                        .defaultValue(InternalField.Constants.NULL_DEFAULT_VALUE)
+                        .build()))
+            .build();
+
+    Schema expected =
+        new Schema(
+            Types.NestedField.required(
+                1,
+                "requiredMapNullableValues",
+                Types.MapType.ofOptional(5, 6, Types.StringType.get(), Types.IntegerType.get())),
+            Types.NestedField.optional(
+                2,
+                "optionalMapRequiredValues",
+                Types.MapType.ofRequired(7, 8, Types.StringType.get(), Types.IntegerType.get())),
+            Types.NestedField.required(
+                3,
+                "requiredListNullableElements",
+                Types.ListType.ofOptional(9, Types.IntegerType.get())),
+            Types.NestedField.optional(
+                4,
+                "optionalListRequiredElements",
+                Types.ListType.ofRequired(10, Types.IntegerType.get())));
+    Schema actual = SCHEMA_EXTRACTOR.toIceberg(internalSchema);
+    assertTrue(expected.sameSchema(actual), "expected " + expected + " but got " + actual);
+  }
+
+  private static InternalSchema map(
+      boolean nullable, InternalSchema key, InternalSchema value, int keyId, int valueId) {
+    return InternalSchema.builder()
+        .name("map")
+        .dataType(InternalType.MAP)
+        .isNullable(nullable)
+        .fields(
+            Arrays.asList(
+                InternalField.builder()
+                    .name(InternalField.Constants.MAP_KEY_FIELD_NAME)
+                    .fieldId(keyId)
+                    .schema(key)
+                    .build(),
+                InternalField.builder()
+                    .name(InternalField.Constants.MAP_VALUE_FIELD_NAME)
+                    .fieldId(valueId)
+                    .schema(value)
+                    .build()))
+        .build();
+  }
+
+  private static InternalSchema list(boolean nullable, InternalSchema element, int elementId) {
+    return InternalSchema.builder()
+        .name("list")
+        .dataType(InternalType.LIST)
+        .isNullable(nullable)
+        .fields(
+            Collections.singletonList(
+                InternalField.builder()
+                    .name(InternalField.Constants.ARRAY_ELEMENT_FIELD_NAME)
+                    .fieldId(elementId)
+                    .schema(element)
+                    .build()))
+        .build();
+  }
+
   @Test
   public void testLists() {
     InternalSchema recordListElementSchema =
