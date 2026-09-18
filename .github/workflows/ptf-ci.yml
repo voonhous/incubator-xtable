@@ -88,6 +88,15 @@ jobs:
           JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
         run: ./mvnw $PTF_MAVEN_ARGS install -DskipTests -pl xtable-hudi-support/xtable-iceberg-pluggable-tf -am
 
+      - name: Keep the XTable jars for the Spark 4.1 check
+        uses: actions/upload-artifact@v4
+        with:
+          name: xtable-jars
+          path: ~/.m2/repository/org/apache/xtable
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Unit tests
         env:
           JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
@@ -98,6 +107,17 @@ jobs:
           JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
         run: ./mvnw $PTF_MAVEN_ARGS verify -pl xtable-hudi-support/xtable-iceberg-pluggable-tf
 
+      # The default parquet-mr (1.15) cannot express the Parquet VARIANT annotation, so Hudi writes
+      # plain metadata/value groups; 1.16, the version Spark 4.1 ships, makes it annotate them.
+      # The test asserts which layout it got, so this run covers the annotated files.
+      - name: Variant tests with parquet-mr 1.16 (VARIANT-annotated data files)
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
+        run: |
+          ./mvnw $PTF_MAVEN_ARGS verify -pl xtable-hudi-support/xtable-iceberg-pluggable-tf \
+            -Dparquet.version=1.16.0 -Dit.test=ITIcebergVariant -DfailIfNoTests=false \
+            -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false
+
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -107,3 +127,80 @@ jobs:
             **/target/surefire-reports/**
             **/target/failsafe-reports/**
           if-no-files-found: ignore
+
+  # Iceberg reads variant only through its Spark 4 runtimes, and XTable has no Spark 4 build yet.
+  # This job builds Hudi for Spark 4.1, writes a variant table through the Hudi Spark 4.1 datasource
+  # with the Iceberg table format jars from the job above, and checks what Spark 4.1 reads back
+  # through the Iceberg 4.1 runtime. The check exits non-zero on any failed assertion.
+  spark41-variant-check:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CHECK_DIR: .github/ci/spark41-variant-check
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            !~/.m2/repository/org/apache/hudi
+            !~/.m2/repository/org/apache/xtable
+          key: ptf-spark41-m2-${{ runner.os }}-${{ hashFiles('.github/ci/spark41-variant-check/pom.xml') }}
+          restore-keys: |
+            ptf-spark41-m2-${{ runner.os }}-
+
+      - name: Cache the Hudi build
+        id: hudi-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/apache/hudi
+          key: ptf-hudi-${{ runner.os }}-${{ env.HUDI_COMMIT }}-spark4.1-scala2.13
+
+      - name: Build Hudi at ${{ env.HUDI_COMMIT }} (Spark 4.1, Scala 2.13)
+        if: steps.hudi-cache.outputs.cache-hit != 'true'
+        run: |
+          HUDI_DIR="$RUNNER_TEMP/hudi"
+          git init --quiet "$HUDI_DIR"
+          git -C "$HUDI_DIR" fetch --quiet --depth 1 "$HUDI_REPOSITORY" "$HUDI_COMMIT"
+          git -C "$HUDI_DIR" checkout --quiet FETCH_HEAD
+          mvn $PTF_MAVEN_ARGS -f "$HUDI_DIR/pom.xml" install -DskipTests -Dscala-2.13 -Dspark4.1 \
+            -pl packaging/hudi-spark-bundle -am
+
+      - name: Fetch the XTable jars
+        uses: actions/download-artifact@v4
+        with:
+          name: xtable-jars
+          path: ~/.m2/repository/org/apache/xtable
+
+      - name: Build the check
+        run: |
+          mvn $PTF_MAVEN_ARGS -f "$CHECK_DIR/pom.xml" compile dependency:build-classpath \
+            -Dmdep.outputFile=target/classpath.txt
+
+      - name: Write through Hudi on Spark 4.1 and read through Iceberg on Spark 4.1
+        run: |
+          java -Xmx3g \
+            --add-opens=java.base/java.lang=ALL-UNNAMED \
+            --add-opens=java.base/java.lang.invoke=ALL-UNNAMED \
+            --add-opens=java.base/java.lang.reflect=ALL-UNNAMED \
+            --add-opens=java.base/java.io=ALL-UNNAMED \
+            --add-opens=java.base/java.net=ALL-UNNAMED \
+            --add-opens=java.base/java.nio=ALL-UNNAMED \
+            --add-opens=java.base/java.util=ALL-UNNAMED \
+            --add-opens=java.base/java.util.concurrent=ALL-UNNAMED \
+            --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED \
+            --add-opens=java.base/sun.nio.ch=ALL-UNNAMED \
+            --add-opens=java.base/sun.nio.cs=ALL-UNNAMED \
+            --add-opens=java.base/sun.security.action=ALL-UNNAMED \
+            --add-opens=java.base/sun.util.calendar=ALL-UNNAMED \
+            -cp "$CHECK_DIR/target/classes:$(cat $CHECK_DIR/target/classpath.txt)" \
+            org.apache.xtable.ci.Spark41VariantCheck "$RUNNER_TEMP/spark41_variant_table"

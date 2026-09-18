@@ -30,6 +30,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -42,6 +43,10 @@ import org.apache.avro.SchemaBuilder;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.parquet.hadoop.ParquetFileReader;
+import org.apache.parquet.hadoop.util.HadoopInputFile;
+import org.apache.parquet.schema.LogicalTypeAnnotation;
+import org.apache.parquet.schema.MessageType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -262,6 +267,7 @@ class ITIcebergVariant {
         variantMapping.nestedMapping(),
         "the metadata and value components of a variant carry no field ids");
 
+    assertParquetLayout(table);
     Map<String, Record> rows = readWithNameMapping(table, mapping);
     assertEquals(expected.keySet(), rows.keySet());
     for (Map.Entry<String, VariantSpec> e : expected.entrySet()) {
@@ -284,6 +290,42 @@ class ITIcebergVariant {
    * Reads every data file through Iceberg's Parquet readers with the table's name mapping, the way
    * engines resolve files that carry no field ids ({@code IcebergGenerics} does not apply it).
    */
+  /**
+   * Hudi stamps the Parquet VARIANT annotation on the variant group whenever the parquet-mr on its
+   * classpath can express it (1.16 and later), and writes a plain metadata/value group otherwise.
+   * CI runs this test with both, so check that each run really produced the layout it is meant to
+   * cover: Iceberg must read both.
+   */
+  private static void assertParquetLayout(Table table) throws IOException {
+    boolean annotationAvailable =
+        Arrays.stream(LogicalTypeAnnotation.class.getMethods())
+            .anyMatch(method -> method.getName().equals("variantType"));
+    Configuration conf = new Configuration();
+    try (CloseableIterable<FileScanTask> tasks = table.newScan().planFiles()) {
+      for (FileScanTask task : tasks) {
+        try (ParquetFileReader reader =
+            ParquetFileReader.open(
+                HadoopInputFile.fromPath(
+                    new org.apache.hadoop.fs.Path(task.file().location()), conf))) {
+          MessageType fileSchema = reader.getFooter().getFileMetaData().getSchema();
+          for (String column : Arrays.asList("v", "v_req")) {
+            LogicalTypeAnnotation annotation =
+                fileSchema.getType(column).getLogicalTypeAnnotation();
+            assertEquals(
+                annotationAvailable,
+                annotation != null && annotation.toString().startsWith("VARIANT"),
+                String.format(
+                    "column %s of %s: annotation %s, but parquet-mr %s the VARIANT annotation",
+                    column,
+                    task.file().location(),
+                    annotation,
+                    annotationAvailable ? "supports" : "does not support"));
+          }
+        }
+      }
+    }
+  }
+
   private static Map<String, Record> readWithNameMapping(Table table, NameMapping mapping)
       throws IOException {
     Map<String, Record> rows = new LinkedHashMap<>();
