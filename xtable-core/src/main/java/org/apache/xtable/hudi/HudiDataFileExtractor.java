@@ -189,10 +189,6 @@ public class HudiDataFileExtractor implements AutoCloseable {
               List<PartitionValue> partitionValues =
                   partitionValuesExtractor.extractPartitionValues(
                       table.getPartitioningFields(), partitionPath);
-              Map<String, HoodieBaseFile> currentBaseFilesInPartition =
-                  fsView
-                      .getLatestBaseFiles(partitionPath)
-                      .collect(Collectors.toMap(HoodieBaseFile::getFileId, Function.identity()));
               for (HoodieWriteStat writeStat : writeStats) {
                 if (FSUtils.isLogFile(new StoragePath(writeStat.getPath()))) {
                   continue;
@@ -210,10 +206,18 @@ public class HudiDataFileExtractor implements AutoCloseable {
                   filesAddedWithoutStats.add(
                       buildFileWithoutStats(partitionValues, new HoodieBaseFile(pathInfo)));
                 }
-                if (currentBaseFilesInPartition.containsKey(writeStat.getFileId())) {
-                  filesToRemove.add(
-                      buildFileWithoutStats(
-                          partitionValues, currentBaseFilesInPartition.get(writeStat.getFileId())));
+                // The base file this write replaced is the one at the write's prevCommit. The
+                // latest base file of the group is not a substitute: when this commit completes
+                // after a later-started one, the view already lists this commit's own new file as
+                // the latest, which would hide the file actually being replaced.
+                String prevCommit = writeStat.getPrevCommit();
+                if (prevCommit != null && !HoodieWriteStat.NULL_COMMIT.equals(prevCommit)) {
+                  // absent when the replaced slice had no base file, e.g. a log-only slice
+                  fsView
+                      .getBaseFileOn(partitionPath, prevCommit, writeStat.getFileId())
+                      .ifPresent(
+                          previous ->
+                              filesToRemove.add(buildFileWithoutStats(partitionValues, previous)));
                 }
               }
             });
