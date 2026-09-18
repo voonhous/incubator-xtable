@@ -241,6 +241,28 @@ public class TestJavaHudiTable extends TestAbstractHudiTable {
         tableName, schema, tempDir, partitionConfig, tableType, null, false, tableProperties);
   }
 
+  /**
+   * Same as {@link #forStandardSchema(String, Path, String, HoodieTableType, Properties)}, but Hudi
+   * receives the base path without a scheme ({@code /tmp/t} rather than {@code file:/tmp/t}).
+   */
+  public static TestJavaHudiTable forStandardSchemaWithSchemeLessBasePath(
+      String tableName,
+      Path tempDir,
+      String partitionConfig,
+      HoodieTableType tableType,
+      Properties tableProperties) {
+    return new TestJavaHudiTable(
+        tableName,
+        BASIC_SCHEMA,
+        tempDir,
+        partitionConfig,
+        tableType,
+        null,
+        false,
+        tableProperties,
+        true);
+  }
+
   private TestJavaHudiTable(
       String name,
       Schema schema,
@@ -250,7 +272,29 @@ public class TestJavaHudiTable extends TestAbstractHudiTable {
       HoodieArchivalConfig archivalConfig,
       boolean addFieldIds,
       Properties tableProperties) {
-    super(name, schema, tempDir, partitionConfig);
+    this(
+        name,
+        schema,
+        tempDir,
+        partitionConfig,
+        hoodieTableType,
+        archivalConfig,
+        addFieldIds,
+        tableProperties,
+        false);
+  }
+
+  private TestJavaHudiTable(
+      String name,
+      Schema schema,
+      Path tempDir,
+      String partitionConfig,
+      HoodieTableType hoodieTableType,
+      HoodieArchivalConfig archivalConfig,
+      boolean addFieldIds,
+      Properties tableProperties,
+      boolean schemeLessBasePath) {
+    super(name, schema, tempDir, partitionConfig, schemeLessBasePath);
     this.conf = new Configuration();
     this.conf.set("parquet.avro.write-old-list-structure", "false");
     // xtable-prefixed properties configure the pluggable table format, which reads them from the

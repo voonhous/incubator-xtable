@@ -34,6 +34,7 @@ import java.util.stream.Stream;
 import lombok.Builder;
 import lombok.Value;
 
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 
 import org.apache.hudi.avro.model.HoodieRestoreMetadata;
@@ -84,6 +85,7 @@ public class HudiDataFileExtractor implements AutoCloseable {
   private final HoodieMetadataConfig metadataConfig;
   private final FileSystemViewManager fileSystemViewManager;
   private final Path basePath;
+  private final Configuration hadoopConf;
 
   public HudiDataFileExtractor(
       HoodieTableMetaClient metaClient,
@@ -95,6 +97,7 @@ public class HudiDataFileExtractor implements AutoCloseable {
             .enable(metaClient.getTableConfig().isMetadataTableAvailable())
             .build();
     this.basePath = HadoopFSUtils.convertToHadoopPath(metaClient.getBasePath());
+    this.hadoopConf = (Configuration) metaClient.getStorageConf().unwrap();
     this.tableMetadata =
         metadataConfig.isEnabled()
             ? metaClient
@@ -124,6 +127,7 @@ public class HudiDataFileExtractor implements AutoCloseable {
     this.engineContext = new HoodieLocalEngineContext(metaClient.getStorageConf());
     this.metadataConfig = HoodieMetadataConfig.newBuilder().enable(false).build();
     this.basePath = HadoopFSUtils.convertToHadoopPath(metaClient.getBasePath());
+    this.hadoopConf = (Configuration) metaClient.getStorageConf().unwrap();
     this.tableMetadata = null;
     this.fileSystemViewManager = fileSystemViewManager;
     this.metaClient = metaClient;
@@ -543,7 +547,9 @@ public class HudiDataFileExtractor implements AutoCloseable {
       List<PartitionValue> partitionValues, HoodieBaseFile hoodieBaseFile) {
     long rowCount = 0L;
     return InternalDataFile.builder()
-        .physicalPath(hoodieBaseFile.getPath())
+        // the same file reaches here from commit metadata and from file listings, whose paths are
+        // spelled differently; target formats match files by path, so always report one spelling
+        .physicalPath(HudiFilePaths.qualify(hoodieBaseFile.getPath(), hadoopConf))
         .fileFormat(getFileFormat(FSUtils.getFileExtension(hoodieBaseFile.getPath())))
         .partitionValues(partitionValues)
         .fileSizeBytes(Math.max(0, hoodieBaseFile.getFileSize()))

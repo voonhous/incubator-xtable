@@ -145,11 +145,27 @@ public abstract class TestAbstractHudiTable
   protected List<String> partitionFieldNames;
 
   TestAbstractHudiTable(String name, Schema schema, Path tempDir, String partitionConfig) {
+    this(name, schema, tempDir, partitionConfig, false);
+  }
+
+  /**
+   * @param schemeLessBasePath give Hudi the base path as a plain file system path ({@code /tmp/t})
+   *     instead of a {@code file:} URI, the way a Spark job handed a bare path does
+   */
+  TestAbstractHudiTable(
+      String name,
+      Schema schema,
+      Path tempDir,
+      String partitionConfig,
+      boolean schemeLessBasePath) {
     try {
       this.tableName = name;
       this.schema = schema;
       // Initialize base path
       this.basePath = initBasePath(tempDir, name);
+      if (schemeLessBasePath) {
+        this.basePath = tempDir.resolve(name + "_v1").toString();
+      }
       // Add key generator
       this.typedProperties = new TypedProperties();
       typedProperties.put(KeyGeneratorOptions.RECORDKEY_FIELD_NAME.key(), RECORD_KEY_FIELD_NAME);
