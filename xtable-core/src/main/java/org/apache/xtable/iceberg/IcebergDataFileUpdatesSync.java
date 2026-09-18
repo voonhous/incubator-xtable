@@ -46,6 +46,7 @@ import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.RowDelta;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.SnapshotSummary;
 import org.apache.iceberg.StructLike;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.Transaction;
@@ -152,6 +153,31 @@ public class IcebergDataFileUpdatesSync {
     filesRemoved.forEach(overwriteFiles::deleteFile);
     overwriteFiles.set(TableSyncMetadata.XTABLE_METADATA, metadata.toJson());
     overwriteFiles.commit();
+    requireAllRemovalsApplied(transaction, filesRemoved);
+  }
+
+  /**
+   * Iceberg's overwrite silently skips a file to delete that the table does not list, which would
+   * leave a replaced file visible to readers next to its replacement. The staged snapshot must
+   * therefore report exactly as many deleted data files as were requested.
+   */
+  private static void requireAllRemovalsApplied(
+      Transaction transaction, Collection<DataFile> filesRemoved) {
+    Set<String> requested =
+        filesRemoved.stream().map(file -> file.path().toString()).collect(Collectors.toSet());
+    Snapshot staged = transaction.table().currentSnapshot();
+    long deleted =
+        staged == null
+            ? 0L
+            : Long.parseLong(
+                staged.summary().getOrDefault(SnapshotSummary.DELETED_FILES_PROP, "0"));
+    if (deleted != requested.size()) {
+      throw new UpdateException(
+          String.format(
+              "Iceberg removed %d of the %d data files it was asked to remove; the table does not"
+                  + " list some of %s",
+              deleted, requested.size(), requested));
+    }
   }
 
   private static boolean changesNoDataFiles(InternalFilesDiff internalFilesDiff) {
