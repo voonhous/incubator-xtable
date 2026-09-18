@@ -30,9 +30,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  HUDI_REPOSITORY: https://github.com/apache/hudi.git
-  # apache/hudi master as of 2026-09-11; hudi.version in pom.xml (1.3.0-SNAPSHOT) is built from it
-  HUDI_COMMIT: 1d3a0affad873868e74df7207013ae8eeb4dbb8c
+  # apache/hudi master ac6456aca657 (2026-09-18) plus the update-as-delete-insert writer mode from
+  # yihua/hudi mor-update-as-delete-insert, which the merge-on-read deletion-vector tests need and
+  # apache/hudi does not have yet; hudi.version in pom.xml (1.3.0-SNAPSHOT) is built from it
+  HUDI_REPOSITORY: https://github.com/voonhous/hudi.git
+  HUDI_COMMIT: b400ce124fd810d2da5b4fa78c50fe7c819819c8
   MAVEN_OPTS: -Xmx4g -Xss4m
   PTF_MAVEN_ARGS: -B -ntp -Dmaven.build.cache.enabled=false
 
@@ -94,20 +96,7 @@ jobs:
       - name: Iceberg table format tests
         env:
           JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
-        # The merge-on-read deletion-vector tests need the update-as-delete-insert writer mode,
-        # which apache/hudi master does not have; they run separately below.
-        run: |
-          ./mvnw $PTF_MAVEN_ARGS verify -pl xtable-hudi-support/xtable-iceberg-pluggable-tf \
-            -Dit.test='!ITIcebergMergeOnReadDeletionVectors,!ITIcebergMorDvTableServices,!ITIcebergSparkMergeOnReadDeletionVectors'
-
-      - name: Merge-on-read deletion-vector tests (expected to fail on apache/hudi master)
-        continue-on-error: true
-        env:
-          JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
-        run: |
-          ./mvnw $PTF_MAVEN_ARGS verify -pl xtable-hudi-support/xtable-iceberg-pluggable-tf \
-            -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false -DfailIfNoTests=false \
-            -Dit.test='ITIcebergMergeOnReadDeletionVectors,ITIcebergMorDvTableServices,ITIcebergSparkMergeOnReadDeletionVectors'
+        run: ./mvnw $PTF_MAVEN_ARGS verify -pl xtable-hudi-support/xtable-iceberg-pluggable-tf
 
       - name: Upload test reports
         if: always()
