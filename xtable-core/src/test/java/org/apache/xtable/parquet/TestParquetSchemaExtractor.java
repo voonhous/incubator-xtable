@@ -37,6 +37,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import org.apache.xtable.exception.UnsupportedSchemaTypeException;
 import org.apache.xtable.model.schema.InternalField;
 import org.apache.xtable.model.schema.InternalSchema;
 import org.apache.xtable.model.schema.InternalType;
@@ -486,6 +487,60 @@ public class TestParquetSchemaExtractor {
                             .name("element")
                             .dataType(InternalType.INT)
                             .isNullable(elementNullable)
+                            .build())
+                    .build()))
+        .build();
+  }
+
+  @Test
+  public void testVariantIsRejected() {
+    UnsupportedSchemaTypeException e =
+        Assertions.assertThrows(
+            UnsupportedSchemaTypeException.class,
+            () -> schemaExtractor.fromInternalSchema(recordWithNestedVariant(), null));
+    Assertions.assertEquals(
+        "Variant column s.inner cannot be represented as a Parquet type; variant columns are only"
+            + " supported when syncing to Iceberg",
+        e.getMessage());
+  }
+
+  /** A record whose struct field {@code s} holds a variant column {@code inner}. */
+  private static InternalSchema recordWithNestedVariant() {
+    return InternalSchema.builder()
+        .name("record")
+        .dataType(InternalType.RECORD)
+        .isNullable(false)
+        .fields(
+            Arrays.asList(
+                InternalField.builder()
+                    .name("id")
+                    .schema(
+                        InternalSchema.builder()
+                            .name("integer")
+                            .dataType(InternalType.INT)
+                            .isNullable(false)
+                            .build())
+                    .build(),
+                InternalField.builder()
+                    .name("s")
+                    .schema(
+                        InternalSchema.builder()
+                            .name("s")
+                            .dataType(InternalType.RECORD)
+                            .isNullable(false)
+                            .fields(
+                                Collections.singletonList(
+                                    InternalField.builder()
+                                        .name("inner")
+                                        .parentPath("s")
+                                        .schema(
+                                            InternalSchema.builder()
+                                                .name("variant")
+                                                .dataType(InternalType.VARIANT)
+                                                .isNullable(true)
+                                                .build())
+                                        .defaultValue(InternalField.Constants.NULL_DEFAULT_VALUE)
+                                        .build()))
                             .build())
                     .build()))
         .build();
