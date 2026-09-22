@@ -49,6 +49,7 @@ import io.delta.kernel.types.StructType;
 import io.delta.kernel.types.TimestampNTZType;
 import io.delta.kernel.types.TimestampType;
 
+import org.apache.xtable.exception.NotSupportedException;
 import org.apache.xtable.model.schema.InternalField;
 import org.apache.xtable.model.schema.InternalSchema;
 import org.apache.xtable.model.schema.InternalType;
@@ -1794,5 +1795,59 @@ public class TestDeltaKernelSchemaExtractor {
         assertEquals(original.getDataType(), converted.getDataType());
       }
     }
+  }
+
+  @Test
+  public void testVariantIsRejected() {
+    NotSupportedException e =
+        Assertions.assertThrows(
+            NotSupportedException.class,
+            () -> extractor.fromInternalSchema(recordWithNestedVariant()));
+    Assertions.assertEquals(
+        "Variant column s.inner cannot be represented as a Delta Kernel type; variant columns are"
+            + " only supported when syncing to Iceberg",
+        e.getMessage());
+  }
+
+  /** A record whose struct field {@code s} holds a variant column {@code inner}. */
+  private static InternalSchema recordWithNestedVariant() {
+    return InternalSchema.builder()
+        .name("record")
+        .dataType(InternalType.RECORD)
+        .isNullable(false)
+        .fields(
+            Arrays.asList(
+                InternalField.builder()
+                    .name("id")
+                    .schema(
+                        InternalSchema.builder()
+                            .name("integer")
+                            .dataType(InternalType.INT)
+                            .isNullable(false)
+                            .build())
+                    .build(),
+                InternalField.builder()
+                    .name("s")
+                    .schema(
+                        InternalSchema.builder()
+                            .name("s")
+                            .dataType(InternalType.RECORD)
+                            .isNullable(false)
+                            .fields(
+                                Collections.singletonList(
+                                    InternalField.builder()
+                                        .name("inner")
+                                        .parentPath("s")
+                                        .schema(
+                                            InternalSchema.builder()
+                                                .name("variant")
+                                                .dataType(InternalType.VARIANT)
+                                                .isNullable(true)
+                                                .build())
+                                        .defaultValue(InternalField.Constants.NULL_DEFAULT_VALUE)
+                                        .build()))
+                            .build())
+                    .build()))
+        .build();
   }
 }

@@ -28,6 +28,7 @@ import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import org.apache.xtable.exception.NotSupportedException;
 import org.apache.xtable.model.schema.InternalField;
 import org.apache.xtable.model.schema.InternalSchema;
 import org.apache.xtable.model.schema.InternalType;
@@ -738,5 +739,59 @@ public class TestSparkSchemaExtractor {
     Assertions.assertEquals(
         structRepresentation,
         SparkSchemaExtractor.getInstance().fromInternalSchema(InternalSchemaRepresentation));
+  }
+
+  @Test
+  public void testVariantIsRejected() {
+    NotSupportedException e =
+        Assertions.assertThrows(
+            NotSupportedException.class,
+            () -> SparkSchemaExtractor.getInstance().fromInternalSchema(recordWithNestedVariant()));
+    Assertions.assertEquals(
+        "Variant column s.inner cannot be represented as a Spark type; variant columns are only"
+            + " supported when syncing to Iceberg",
+        e.getMessage());
+  }
+
+  /** A record whose struct field {@code s} holds a variant column {@code inner}. */
+  private static InternalSchema recordWithNestedVariant() {
+    return InternalSchema.builder()
+        .name("record")
+        .dataType(InternalType.RECORD)
+        .isNullable(false)
+        .fields(
+            Arrays.asList(
+                InternalField.builder()
+                    .name("id")
+                    .schema(
+                        InternalSchema.builder()
+                            .name("integer")
+                            .dataType(InternalType.INT)
+                            .isNullable(false)
+                            .build())
+                    .build(),
+                InternalField.builder()
+                    .name("s")
+                    .schema(
+                        InternalSchema.builder()
+                            .name("s")
+                            .dataType(InternalType.RECORD)
+                            .isNullable(false)
+                            .fields(
+                                Collections.singletonList(
+                                    InternalField.builder()
+                                        .name("inner")
+                                        .parentPath("s")
+                                        .schema(
+                                            InternalSchema.builder()
+                                                .name("variant")
+                                                .dataType(InternalType.VARIANT)
+                                                .isNullable(true)
+                                                .build())
+                                        .defaultValue(InternalField.Constants.NULL_DEFAULT_VALUE)
+                                        .build()))
+                            .build())
+                    .build()))
+        .build();
   }
 }
