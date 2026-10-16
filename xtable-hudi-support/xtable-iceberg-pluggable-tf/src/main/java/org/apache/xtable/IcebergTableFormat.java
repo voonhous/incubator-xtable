@@ -44,6 +44,7 @@ import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.table.HoodieTableVersion;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.table.timeline.TimelineFactory;
@@ -104,7 +105,9 @@ public class IcebergTableFormat implements HoodieTableFormat {
    */
   @Override
   public void init(Properties properties) {
-    requireCopyOnWrite(new HoodieConfig(TypedProperties.copy(properties)));
+    HoodieConfig tableConfig = new HoodieConfig(TypedProperties.copy(properties));
+    requireCopyOnWrite(tableConfig);
+    requireTableVersionEightOrLater(tableConfig);
     this.tableFormatSync = TableFormatSync.getInstance();
   }
 
@@ -416,6 +419,26 @@ public class IcebergTableFormat implements HoodieTableFormat {
               HoodieTableType.COPY_ON_WRITE,
               tableConfig.getStringOrDefault(HoodieTableConfig.NAME, ""),
               tableType));
+    }
+  }
+
+  /**
+   * The reconstructed timeline is built on the version 2 timeline layout, which table versions
+   * below 8 do not have, and on version 6 a savepoint, which shares its commit's requested time,
+   * would never count as newer than the last synced instant.
+   *
+   * @throws UnsupportedOperationException when the table version is below 8
+   */
+  static void requireTableVersionEightOrLater(HoodieConfig tableConfig) {
+    HoodieTableVersion version = HoodieTableConfig.getTableVersion(tableConfig);
+    if (version.lesserThan(HoodieTableVersion.EIGHT)) {
+      throw new UnsupportedOperationException(
+          String.format(
+              "The Iceberg table format requires table version %d or later, but table %s is at"
+                  + " version %d",
+              HoodieTableVersion.EIGHT.versionCode(),
+              tableConfig.getStringOrDefault(HoodieTableConfig.NAME, ""),
+              version.versionCode()));
     }
   }
 

@@ -22,7 +22,6 @@ import static org.apache.hudi.hadoop.fs.HadoopFSUtils.getStorageConf;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.HashSet;
@@ -38,6 +37,7 @@ import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
+import org.apache.hudi.storage.StoragePath;
 
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Table;
@@ -64,12 +64,14 @@ final class IcebergTableAssertions {
     Set<String> referenced = new HashSet<>();
     try (CloseableIterable<FileScanTask> tasks = icebergTable(basePath).newScan().planFiles()) {
       for (FileScanTask task : tasks) {
-        referenced.add(URI.create(task.file().path().toString()).getPath());
+        referenced.add(new StoragePath(task.file().path().toString()).toUri().getPath());
       }
     }
+    // StoragePath parses a path the way Hudi spells it, with a space or a percent sign as is,
+    // which java.net.URI rejects.
     Set<String> expected =
         expectedBaseFiles.stream()
-            .map(path -> URI.create(path).getPath())
+            .map(path -> new StoragePath(path).toUri().getPath())
             .collect(Collectors.toSet());
     assertEquals(expected, referenced, "Iceberg must reference exactly the live Hudi base files");
     for (String path : referenced) {

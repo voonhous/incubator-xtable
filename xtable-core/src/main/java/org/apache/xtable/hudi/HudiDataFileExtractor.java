@@ -20,7 +20,6 @@ package org.apache.xtable.hudi;
 
 import java.io.IOException;
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -71,7 +70,6 @@ import org.apache.xtable.collectors.CustomCollectors;
 import org.apache.xtable.exception.NotSupportedException;
 import org.apache.xtable.exception.ReadException;
 import org.apache.xtable.model.InternalTable;
-import org.apache.xtable.model.exception.ParseException;
 import org.apache.xtable.model.schema.InternalPartitionField;
 import org.apache.xtable.model.stat.PartitionValue;
 import org.apache.xtable.model.storage.FileFormat;
@@ -546,22 +544,14 @@ public class HudiDataFileExtractor implements AutoCloseable {
         partitionValuesExtractor.extractPartitionValues(partitioningFields, partitionPath);
     // Rollback metadata records the paths as the writer spelled them, which under a plain base
     // path means without a scheme, while the files were added to the target under the qualified
-    // form; the qualified base path always has a scheme to supply.
-    URI basePathUri = qualifiedBasePath().toUri();
+    // form. Qualifying through StoragePath keeps the spelling the files were added under: a URI
+    // built from the string would percent-encode a space or a % in a partition value, and Iceberg
+    // ignores a delete whose path it does not hold.
+    URI storageUri = metaClient.getStorage().getUri();
     return deletedPaths.stream()
-        .map(
-            path -> {
-              try {
-                if (path.startsWith(basePathUri.getScheme())) {
-                  return path;
-                }
-                return new URI(basePathUri.getScheme(), path, null).toString();
-              } catch (URISyntaxException e) {
-                throw new ParseException("Unable to parse path " + path, e);
-              }
-            })
-        .filter(uri -> !FSUtils.isLogFile(new Path(uri).getName()))
-        .map(HoodieBaseFile::new)
+        .map(path -> new StoragePath(path).makeQualified(storageUri))
+        .filter(path -> !FSUtils.isLogFile(path.getName()))
+        .map(path -> new HoodieBaseFile(path.toString()))
         .map(baseFile -> buildFileWithoutStats(partitionValues, baseFile))
         .collect(CustomCollectors.toList(deletedPaths.size()));
   }

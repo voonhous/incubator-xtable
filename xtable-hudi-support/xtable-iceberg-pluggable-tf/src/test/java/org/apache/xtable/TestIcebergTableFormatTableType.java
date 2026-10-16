@@ -65,6 +65,21 @@ class TestIcebergTableFormatTableType {
     assertDoesNotThrow(() -> new IcebergTableFormat().init(new Properties()));
   }
 
+  @Test
+  void tableVersionsBelowEightAreRejectedWhenTheFormatIsInitialized() {
+    // The reconstructed timeline is built on the version 2 timeline layout, and on version 6 a
+    // savepoint, which shares its commit's requested time, is never after the last synced instant.
+    Properties properties = new Properties();
+    properties.setProperty(HoodieTableConfig.NAME.key(), "test_table");
+    properties.setProperty(HoodieTableConfig.VERSION.key(), "6");
+    UnsupportedOperationException exception =
+        assertThrows(
+            UnsupportedOperationException.class, () -> new IcebergTableFormat().init(properties));
+    assertTrue(exception.getMessage().contains("version 6"), exception.getMessage());
+    properties.setProperty(HoodieTableConfig.VERSION.key(), "8");
+    assertDoesNotThrow(() -> new IcebergTableFormat().init(properties));
+  }
+
   private static HoodieTableConfig tableConfig(HoodieTableType tableType) {
     HoodieTableConfig tableConfig = new HoodieTableConfig();
     tableConfig.setValue(HoodieTableConfig.NAME, "test_table");

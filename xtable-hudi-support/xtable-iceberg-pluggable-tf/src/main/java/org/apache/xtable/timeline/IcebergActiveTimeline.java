@@ -30,6 +30,7 @@ import java.util.stream.Collectors;
 import org.apache.hadoop.conf.Configuration;
 
 import org.apache.hudi.avro.model.HoodieRestorePlan;
+import org.apache.hudi.avro.model.HoodieRollbackPlan;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
@@ -62,6 +63,13 @@ public class IcebergActiveTimeline extends ActiveTimelineV2 {
               HoodieTimeline.DELTA_COMMIT_ACTION,
               HoodieTimeline.REPLACE_COMMIT_ACTION,
               HoodieTimeline.CLUSTERING_ACTION));
+
+  /**
+   * Keys of the completed commits reported as history although no retained snapshot records them,
+   * because their snapshots were expired. Assigned while the instants are loaded, which the
+   * constructors run before any field initializer would.
+   */
+  private Set<String> expiredHistoryKeys;
 
   public IcebergActiveTimeline(
       HoodieTableMetaClient metaClient,
@@ -96,6 +104,32 @@ public class IcebergActiveTimeline extends ActiveTimelineV2 {
   @Override
   public void saveToRestoreRequested(HoodieInstant instant, HoodieRestorePlan metadata) {
     throw restoreNotSupported(metaClient.getTableConfig());
+  }
+
+  /**
+   * A commit whose snapshot has been expired is reported completed, and Hudi permits rolling back
+   * its latest commit, but without the snapshot Iceberg no longer knows which files the commit
+   * added or superseded, so the rollback would leave deleted files referenced and the previous
+   * versions missing. It is refused before its plan is written, so no pending rollback is left
+   * behind.
+   */
+  @Override
+  public void saveToRollbackRequested(HoodieInstant instant, HoodieRollbackPlan metadata) {
+    if (expiredHistoryKeys != null && metadata.getInstantToRollback() != null) {
+      String key =
+          metadata.getInstantToRollback().getCommitTime()
+              + "."
+              + metadata.getInstantToRollback().getAction();
+      if (expiredHistoryKeys.contains(key)) {
+        throw new UnsupportedOperationException(
+            String.format(
+                "The Iceberg snapshot of instant %s has been expired, so table %s cannot roll it"
+                    + " back: Iceberg no longer records which files the instant added or replaced",
+                metadata.getInstantToRollback().getCommitTime(),
+                metaClient.getTableConfig().getTableName()));
+      }
+    }
+    super.saveToRollbackRequested(instant, metadata);
   }
 
   /** A restore left pending by a native writer is refused before it schedules any rollback. */
@@ -163,27 +197,37 @@ public class IcebergActiveTimeline extends ActiveTimelineV2 {
     }
     // Snapshots older than the oldest retained one have been expired, by the archiver or by an
     // Iceberg expire-snapshots run, so a completed instant older than the oldest recorded instant
-    // is history rather than pending work.
+    // is history rather than pending work. A commit that still has its markers is the exception:
+    // its publish failed before postCommit deleted them, and under lazy failed-write cleaning a
+    // later write lands the first snapshot before the failed commit is rolled back.
     Option<HoodieInstant> oldestRecordedInstant =
         ancestors.isEmpty()
             ? Option.empty()
             : Option.of(
                 IcebergSnapshotInstants.recordedInstant(
                     ancestors.get(0), metaClient.getInstantGenerator()));
-    return instantsFromHoodieTimeline.stream()
-        .map(
-            instant -> {
-              if (!instant.isCompleted()
-                  || recordedInstantKeys.contains(instantKey(instant))
-                  || completedBeforeRetainedHistory(instant, oldestRecordedInstant)) {
-                return instant;
-              }
-              // Completed in Hudi but not recorded by Iceberg: the write did not finish, so the
-              // next writer rolls it back.
-              return asPending(instant);
-            })
-        .sorted(InstantComparatorV2.REQUESTED_TIME_BASED_COMPARATOR)
-        .collect(Collectors.toList());
+    Set<String> expiredHistory = new HashSet<>();
+    List<HoodieInstant> instants =
+        instantsFromHoodieTimeline.stream()
+            .map(
+                instant -> {
+                  if (!instant.isCompleted() || recordedInstantKeys.contains(instantKey(instant))) {
+                    return instant;
+                  }
+                  if (completedBeforeRetainedHistory(instant, oldestRecordedInstant)
+                      && !(COMMIT_ACTIONS.contains(instant.getAction())
+                          && hasMarkers(metaClient, instant))) {
+                    expiredHistory.add(instantKey(instant));
+                    return instant;
+                  }
+                  // Completed in Hudi but not recorded by Iceberg: the write did not finish, so the
+                  // next writer rolls it back.
+                  return asPending(instant, pendingAction(metaClient, instant));
+                })
+            .sorted(InstantComparatorV2.REQUESTED_TIME_BASED_COMPARATOR)
+            .collect(Collectors.toList());
+    this.expiredHistoryKeys = expiredHistory;
+    return instants;
   }
 
   /**
@@ -228,7 +272,11 @@ public class IcebergActiveTimeline extends ActiveTimelineV2 {
               basePath));
     }
     return instants.stream()
-        .map(instant -> completedCommits.contains(instant) ? asPending(instant) : instant)
+        .map(
+            instant ->
+                completedCommits.contains(instant)
+                    ? asPending(instant, instant.getAction())
+                    : instant)
         .sorted(InstantComparatorV2.REQUESTED_TIME_BASED_COMPARATOR)
         .collect(Collectors.toList());
   }
@@ -243,10 +291,39 @@ public class IcebergActiveTimeline extends ActiveTimelineV2 {
     }
   }
 
-  private static HoodieInstant asPending(HoodieInstant instant) {
+  /**
+   * The action a completed replacecommit has while pending: a clustering completes as a
+   * replacecommit, but its requested and inflight files carry the clustering action, and Hudi reads
+   * the clustering plan from the requested file named after the pending instant's action.
+   */
+  private static String pendingAction(HoodieTableMetaClient metaClient, HoodieInstant instant) {
+    if (!HoodieTimeline.REPLACE_COMMIT_ACTION.equals(instant.getAction())) {
+      return instant.getAction();
+    }
+    HoodieInstant clusteringRequested =
+        metaClient
+            .getInstantGenerator()
+            .createNewInstant(
+                HoodieInstant.State.REQUESTED,
+                HoodieTimeline.CLUSTERING_ACTION,
+                instant.requestedTime());
+    StoragePath clusteringPlan =
+        new StoragePath(
+            metaClient.getTimelinePath(),
+            metaClient.getInstantFileNameGenerator().getFileName(clusteringRequested));
+    try {
+      return metaClient.getStorage().exists(clusteringPlan)
+          ? HoodieTimeline.CLUSTERING_ACTION
+          : instant.getAction();
+    } catch (IOException e) {
+      throw new HoodieIOException("Unable to check the clustering plan of " + instant, e);
+    }
+  }
+
+  private static HoodieInstant asPending(HoodieInstant instant, String action) {
     return new HoodieInstant(
         HoodieInstant.State.INFLIGHT,
-        instant.getAction(),
+        action,
         instant.requestedTime(),
         instant.getCompletionTime(),
         InstantComparatorV2.REQUESTED_TIME_BASED_COMPARATOR);
