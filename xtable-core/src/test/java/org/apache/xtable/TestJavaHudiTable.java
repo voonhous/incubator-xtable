@@ -148,6 +148,29 @@ public class TestJavaHudiTable extends TestAbstractHudiTable {
         basePath);
   }
 
+  /**
+   * Same as the archival-config factory, with table-level properties the write config also takes.
+   */
+  public static TestJavaHudiTable forStandardSchema(
+      String tableName,
+      Path tempDir,
+      String partitionConfig,
+      HoodieTableType tableType,
+      HoodieArchivalConfig archivalConfig,
+      Properties tableProperties) {
+    return new TestJavaHudiTable(
+        tableName,
+        BASIC_SCHEMA,
+        tempDir,
+        partitionConfig,
+        tableType,
+        archivalConfig,
+        false,
+        HoodieTableVersion.SIX,
+        tableProperties,
+        null);
+  }
+
   public static TestJavaHudiTable forStandardSchemaWithFieldIds(
       String tableName, Path tempDir, String partitionConfig, HoodieTableType tableType) {
     return new TestJavaHudiTable(

@@ -18,7 +18,6 @@
  
 package org.apache.xtable;
 
-import static org.apache.hudi.hadoop.fs.HadoopFSUtils.getStorageConf;
 import static org.apache.xtable.IcebergTableAssertions.assertIcebergReferencesExactly;
 import static org.apache.xtable.IcebergTableAssertions.assertNothingPending;
 import static org.apache.xtable.IcebergTableAssertions.completedCommitTimes;
@@ -28,33 +27,32 @@ import static org.apache.xtable.IcebergTableAssertions.reconstructedTimeline;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.Properties;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
-import org.apache.hadoop.conf.Configuration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import org.apache.hudi.common.config.HoodieMetadataConfig;
-import org.apache.hudi.common.engine.HoodieLocalEngineContext;
 import org.apache.hudi.common.model.HoodieAvroPayload;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
-import org.apache.hudi.metadata.HoodieTableMetadataUtil;
 
 import org.apache.iceberg.Table;
 
@@ -304,54 +302,47 @@ class ITIcebergTimelineRecovery {
   }
 
   @Test
-  void clusteringWhosePublishFailedIsRolledBackByTheNextWriter() {
-    String tableName = "recovery_" + UUID.randomUUID();
-    String basePath = tempDir.resolve(tableName).toString();
-    List<String> filesBeforeClustering;
-    try (TestJavaHudiTable table =
-        TestJavaHudiTable.forStandardSchemaAtBasePath(
-            tableName, basePath, null, HoodieTableType.COPY_ON_WRITE, new Properties())) {
+  void clusteringWhosePublishFailedIsRolledBackByTheNextWriter() throws IOException {
+    try (TestJavaHudiTable table = newTable()) {
       table.insertRecords(100, true);
       table.insertRecords(100, true);
-      filesBeforeClustering = table.getAllLatestBaseFilePaths();
-    }
-    // A writer with the metadata table left at its default completes the clustering in Hudi, and
-    // the commit hook then refuses it, so the completed replacecommit has no snapshot.
-    Properties metadataTableEnabled = new Properties();
-    metadataTableEnabled.setProperty(HoodieMetadataConfig.ENABLE.key(), "true");
-    try (TestJavaHudiTable table =
-        TestJavaHudiTable.forStandardSchemaAtBasePath(
-            tableName, basePath, null, HoodieTableType.COPY_ON_WRITE, metadataTableEnabled)) {
-      assertThrows(Exception.class, table::cluster);
-    }
-    HoodieTableMetadataUtil.deleteMetadataTable(
-        basePath, new HoodieLocalEngineContext(getStorageConf(new Configuration())));
-    try (TestJavaHudiTable table =
-        TestJavaHudiTable.forStandardSchemaAtBasePath(
-            tableName, basePath, null, HoodieTableType.COPY_ON_WRITE, new Properties())) {
+      List<String> filesBeforeClustering = table.getAllLatestBaseFilePaths();
+      // A read-only Iceberg metadata directory fails the publish after Hudi has completed the
+      // clustering, so the completed replacecommit has no snapshot.
+      Path metadataDirectory = Paths.get(URI.create(table.getBasePath())).resolve("metadata");
+      Set<PosixFilePermission> writable = Files.getPosixFilePermissions(metadataDirectory);
+      Files.setPosixFilePermissions(
+          metadataDirectory, PosixFilePermissions.fromString("r-xr-xr-x"));
+      assumeTrue(!Files.isWritable(metadataDirectory), "needs a user the permissions bind");
+      try {
+        assertThrows(Exception.class, table::cluster);
+      } finally {
+        Files.setPosixFilePermissions(metadataDirectory, writable);
+      }
+
       // The pending instant has to be reported with the clustering action, since the only
       // requested file on disk is the clustering plan, which Hudi reads on every write and on
       // every file system view build.
-      HoodieTimeline before = reconstructedTimeline(basePath);
+      HoodieTimeline before = reconstructedTimeline(table.getBasePath());
       assertEquals(
           1,
           before.filterPendingClusteringTimeline().countInstants(),
           before.getInstants().toString());
       String clustering =
           before.filterPendingClusteringTimeline().firstInstant().get().requestedTime();
-      assertEquals(200, icebergRowCount(basePath));
+      assertEquals(200, icebergRowCount(table.getBasePath()));
 
       table.insertRecords(10, true);
       table.getWriteClient().rollback(clustering);
 
       // As for a native table, the rollback deletes the clustered files and leaves the clustering
       // plan pending for the next clustering run; the replaced file groups are live again in both.
-      HoodieTimeline after = reconstructedTimeline(basePath);
+      HoodieTimeline after = reconstructedTimeline(table.getBasePath());
       assertEquals(1, after.filterPendingClusteringTimeline().countInstants());
       assertEquals(1, after.filterInflightsAndRequested().countInstants());
-      assertIcebergReferencesExactly(basePath, table.getAllLatestBaseFilePaths());
+      assertIcebergReferencesExactly(table.getBasePath(), table.getAllLatestBaseFilePaths());
       assertTrue(table.getAllLatestBaseFilePaths().containsAll(filesBeforeClustering));
-      assertEquals(210, icebergRowCount(basePath));
+      assertEquals(210, icebergRowCount(table.getBasePath()));
     }
   }
 }

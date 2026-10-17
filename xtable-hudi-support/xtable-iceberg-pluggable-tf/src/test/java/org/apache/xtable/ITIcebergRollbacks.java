@@ -92,9 +92,11 @@ class ITIcebergRollbacks {
     String basePath = tempDir.resolve(tableName).toString();
     List<String> filesAfterInsert;
     String upsertCommit;
+    Properties metadataTableDisabled = new Properties();
+    metadataTableDisabled.setProperty(HoodieMetadataConfig.ENABLE.key(), "false");
     try (TestJavaHudiTable table =
         TestJavaHudiTable.forStandardSchemaAtBasePath(
-            tableName, basePath, null, HoodieTableType.COPY_ON_WRITE, new Properties())) {
+            tableName, basePath, null, HoodieTableType.COPY_ON_WRITE, metadataTableDisabled)) {
       List<HoodieRecord<HoodieAvroPayload>> inserts = table.insertRecords(100, true);
       filesAfterInsert = table.getAllLatestBaseFilePaths();
       table.upsertRecords(inserts.subList(0, 20), true);
@@ -102,8 +104,7 @@ class ITIcebergRollbacks {
           table.getMetaClient().reloadActiveTimeline().lastInstant().get().requestedTime();
     }
     // Hudi's Spark rollback procedures build their own write config, which leaves the metadata
-    // table at its default, so the rollback runs with a metadata table. It must still be recorded:
-    // Hudi has deleted the files by the time the hook runs.
+    // table at its default, so a rollback can be the first operation that builds one.
     Properties metadataTableEnabled = new Properties();
     metadataTableEnabled.setProperty(HoodieMetadataConfig.ENABLE.key(), "true");
     try (TestJavaHudiTable table =

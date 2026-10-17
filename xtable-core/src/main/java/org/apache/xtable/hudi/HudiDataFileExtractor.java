@@ -215,7 +215,7 @@ public class HudiDataFileExtractor implements AutoCloseable {
                 }
                 if (currentBaseFilesInPartition.containsKey(writeStat.getFileId())) {
                   filesToRemove.add(
-                      buildFileWithoutStats(
+                      buildViewFileWithoutStats(
                           partitionValues, currentBaseFilesInPartition.get(writeStat.getFileId())));
                 }
               }
@@ -288,7 +288,8 @@ public class HudiDataFileExtractor implements AutoCloseable {
               .filter(baseFile -> fileIdsToRestore.contains(baseFile.getFileId()))
               .forEach(
                   baseFile ->
-                      filesAddedWithoutStats.add(buildFileWithoutStats(partitionValues, baseFile)));
+                      filesAddedWithoutStats.add(
+                          buildViewFileWithoutStats(partitionValues, baseFile)));
         });
     List<InternalDataFile> filesAdded =
         fileStatsExtractor
@@ -386,7 +387,7 @@ public class HudiDataFileExtractor implements AutoCloseable {
                                           + " the file system view at %s",
                                       fileId, partitionPath, commit));
                             }
-                            return buildFileWithoutStats(partitionValues, replaced);
+                            return buildViewFileWithoutStats(partitionValues, replaced);
                           })
                       .collect(Collectors.toList()));
             });
@@ -747,6 +748,23 @@ public class HudiDataFileExtractor implements AutoCloseable {
    * @param hoodieBaseFile the base file from Hudi
    * @return {@link InternalDataFile} without any statistics or rowCount value set.
    */
+  /**
+   * A file taken from the file system view, whose path is qualified here: the Hudi metadata table
+   * lists files under the partition path it is asked for, which under a plain base path has no
+   * scheme, while the files a commit writes are recorded under the qualified form, and the target
+   * matches a removed or restored file to an added one by its path.
+   */
+  private InternalDataFile buildViewFileWithoutStats(
+      List<PartitionValue> partitionValues, HoodieBaseFile hoodieBaseFile) {
+    InternalDataFile file = buildFileWithoutStats(partitionValues, hoodieBaseFile);
+    return file.toBuilder()
+        .physicalPath(
+            new StoragePath(file.getPhysicalPath())
+                .makeQualified(metaClient.getStorage().getUri())
+                .toString())
+        .build();
+  }
+
   private InternalDataFile buildFileWithoutStats(
       List<PartitionValue> partitionValues, HoodieBaseFile hoodieBaseFile) {
     long rowCount = 0L;
