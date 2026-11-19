@@ -45,8 +45,8 @@ import org.apache.hudi.storage.StoragePath;
 
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
-import org.apache.iceberg.catalog.TableIdentifier;
 
+import org.apache.xtable.IcebergFormatConfig;
 import org.apache.xtable.iceberg.IcebergTableManager;
 
 /**
@@ -176,18 +176,15 @@ public class IcebergActiveTimeline extends ActiveTimelineV2 {
         super.getInstantsFromFileSystem(metaClient, includedExtensions, applyLayoutFilters);
     IcebergTableManager icebergTableManager =
         IcebergTableManager.of((Configuration) metaClient.getStorageConf().unwrap());
-    TableIdentifier tableIdentifier =
-        TableIdentifier.of(metaClient.getTableConfig().getTableName());
-    if (!icebergTableManager.tableExists(
-        null, tableIdentifier, metaClient.getBasePath().toString())) {
+    IcebergFormatConfig formatConfig = IcebergFormatConfig.of(metaClient);
+    if (!formatConfig.tableExists(icebergTableManager, metaClient)) {
       return instantsBeforeTheFirstSnapshot(
           metaClient.getTableConfig().getTableName(),
           metaClient.getBasePath(),
           instantsFromHoodieTimeline,
           instant -> hasMarkers(metaClient, instant));
     }
-    Table icebergTable =
-        icebergTableManager.getTable(null, tableIdentifier, metaClient.getBasePath().toString());
+    Table icebergTable = formatConfig.getTable(icebergTableManager, metaClient);
     List<Snapshot> ancestors = IcebergSnapshotInstants.ancestorsOldestFirst(icebergTable);
     Set<String> recordedInstantKeys = new HashSet<>();
     for (Snapshot snapshot : ancestors) {

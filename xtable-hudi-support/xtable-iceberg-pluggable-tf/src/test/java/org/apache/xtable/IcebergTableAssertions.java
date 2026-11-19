@@ -58,11 +58,15 @@ final class IcebergTableAssertions {
     return new HadoopTables(new Configuration()).exists(basePath);
   }
 
+  static void assertIcebergReferencesExactly(String basePath, List<String> expectedBaseFiles) {
+    assertIcebergReferencesExactly(icebergTable(basePath), expectedBaseFiles);
+  }
+
   /** Iceberg plans exactly the given Hudi base files, and each of them exists on storage. */
   @SneakyThrows
-  static void assertIcebergReferencesExactly(String basePath, List<String> expectedBaseFiles) {
+  static void assertIcebergReferencesExactly(Table icebergTable, List<String> expectedBaseFiles) {
     Set<String> referenced = new HashSet<>();
-    try (CloseableIterable<FileScanTask> tasks = icebergTable(basePath).newScan().planFiles()) {
+    try (CloseableIterable<FileScanTask> tasks = icebergTable.newScan().planFiles()) {
       for (FileScanTask task : tasks) {
         referenced.add(new StoragePath(task.file().path().toString()).toUri().getPath());
       }
