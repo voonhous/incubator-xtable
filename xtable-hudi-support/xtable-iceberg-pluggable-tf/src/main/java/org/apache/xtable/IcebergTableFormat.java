@@ -584,9 +584,11 @@ public class IcebergTableFormat implements HoodieTableFormat {
             .namespace(config.getNamespace())
             .catalogConfig(config.getCatalogConfig())
             .build();
+    // A copy, since the meta client's configuration is shared with the rest of the writer.
+    Configuration conf = new Configuration((Configuration) metaClient.getStorageConf().unwrap());
+    conf.setInt(IcebergTableManager.ICEBERG_FORMAT_VERSION, config.getFormatVersion());
     return (IcebergConversionTarget)
-        ConversionTargetFactory.getInstance()
-            .createForFormat(targetTable, (Configuration) metaClient.getStorageConf().unwrap());
+        ConversionTargetFactory.getInstance().createForFormat(targetTable, conf);
   }
 
   /**

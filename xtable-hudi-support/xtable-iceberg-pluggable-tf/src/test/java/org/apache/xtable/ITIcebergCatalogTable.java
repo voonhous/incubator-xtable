@@ -21,6 +21,7 @@ package org.apache.xtable;
 import static org.apache.xtable.IcebergTableAssertions.assertIcebergReferencesExactly;
 import static org.apache.xtable.IcebergTableAssertions.assertNothingPending;
 import static org.apache.xtable.IcebergTableAssertions.completedCommitTimes;
+import static org.apache.xtable.IcebergTableAssertions.createWithTableConfig;
 import static org.apache.xtable.IcebergTableAssertions.icebergTableExists;
 import static org.apache.xtable.IcebergTableAssertions.reconstructedTimeline;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -45,8 +46,6 @@ import org.junit.jupiter.api.io.TempDir;
 
 import org.apache.hudi.common.model.HoodieAvroPayload;
 import org.apache.hudi.common.model.HoodieRecord;
-import org.apache.hudi.common.model.HoodieTableType;
-import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.storage.StoragePath;
@@ -113,7 +112,7 @@ class ITIcebergCatalogTable {
 
   @Test
   void publishesInsertUpsertRollbackCleanAndArchivalThroughTheCatalog() {
-    try (TestJavaHudiTable table = createWithTableConfig(tableName, settings)) {
+    try (TestJavaHudiTable table = createWithTableConfig(tableName, tempDir, settings)) {
       String basePath = table.getBasePath();
       String hudiBasePath = table.getMetaClient().getBasePath().toUri().getPath();
 
@@ -173,7 +172,7 @@ class ITIcebergCatalogTable {
 
   @Test
   void rollbackOfTheOnlyCommitDescribesTheTableFromTheCatalog() {
-    try (TestJavaHudiTable table = createWithTableConfig(tableName, settings)) {
+    try (TestJavaHudiTable table = createWithTableConfig(tableName, tempDir, settings)) {
       String commit1 = table.startCommit();
       table.insertRecordsWithCommitAlreadyStarted(table.generateRecords(20), commit1, true);
       Types.StructType schemaBeforeRollback = catalog.loadTable(identifier).schema().asStruct();
@@ -186,22 +185,6 @@ class ITIcebergCatalogTable {
       assertMatchesHudi(table, rolledBack, Collections.singleton(commit1));
       assertNothingPending(reconstructedTimeline(table.getBasePath()));
     }
-  }
-
-  /**
-   * Hudi does not copy writer properties under {@code hoodie.table.format.} into {@code
-   * hoodie.properties} when it creates a table, so the settings are written before the first commit
-   * and the table is opened again to pick them up.
-   */
-  private static TestJavaHudiTable createWithTableConfig(String tableName, Properties settings) {
-    try (TestJavaHudiTable created =
-        TestJavaHudiTable.forStandardSchema(
-            tableName, tempDir, null, HoodieTableType.COPY_ON_WRITE)) {
-      HoodieTableMetaClient metaClient = created.getMetaClient();
-      HoodieTableConfig.update(metaClient.getStorage(), metaClient.getMetaPath(), settings);
-    }
-    return TestJavaHudiTable.forStandardSchema(
-        tableName, tempDir, null, HoodieTableType.COPY_ON_WRITE);
   }
 
   /**

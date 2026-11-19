@@ -41,6 +41,10 @@ import org.apache.xtable.iceberg.IcebergTableManager;
  * table service publishes to the same Iceberg table. When the table config names no catalog, the
  * catalog is taken from the Hadoop configuration under {@code xtable.iceberg.catalog.}, and without
  * either the Iceberg metadata is kept at the Hudi base path.
+ *
+ * <p>A table the format creates gets the format version from the table config, else from {@code
+ * xtable.iceberg.format-version} in the Hadoop configuration, else {@value
+ * #DEFAULT_FORMAT_VERSION}; an existing table keeps its version.
  */
 @Getter
 public class IcebergFormatConfig {
@@ -51,12 +55,15 @@ public class IcebergFormatConfig {
   /** Dot separated namespace of the Iceberg table, for example {@code db} or {@code a.b}. */
   public static final String NAMESPACE = PREFIX + "namespace";
 
+  public static final String FORMAT_VERSION = PREFIX + "format-version";
+
   public static final String HADOOP_PREFIX = "xtable.iceberg.catalog.";
   public static final String HADOOP_CATALOG_NAME = HADOOP_PREFIX + "name";
   public static final String HADOOP_CATALOG_IMPL = HADOOP_PREFIX + "impl";
   public static final String HADOOP_CATALOG_OPTION_PREFIX = HADOOP_PREFIX + "option.";
 
   static final String DEFAULT_CATALOG_NAME = "iceberg";
+  static final int DEFAULT_FORMAT_VERSION = 3;
 
   /** Null when the Iceberg metadata is kept at the Hudi base path. */
   private final IcebergCatalogConfig catalogConfig;
@@ -64,9 +71,13 @@ public class IcebergFormatConfig {
   /** Null when the table is not in a namespace. */
   private final String[] namespace;
 
-  private IcebergFormatConfig(IcebergCatalogConfig catalogConfig, String[] namespace) {
+  private final int formatVersion;
+
+  private IcebergFormatConfig(
+      IcebergCatalogConfig catalogConfig, String[] namespace, int formatVersion) {
     this.catalogConfig = catalogConfig;
     this.namespace = namespace;
+    this.formatVersion = formatVersion;
   }
 
   public static IcebergFormatConfig of(HoodieTableMetaClient metaClient) {
@@ -77,14 +88,25 @@ public class IcebergFormatConfig {
 
   /**
    * @param tableConfig the table's {@code hoodie.properties}
-   * @param hadoopConf consulted for the catalog only when the table config names none; may be null
-   * @throws IllegalArgumentException when a catalog is named without an implementation
+   * @param hadoopConf consulted for the catalog and the format version only when the table config
+   *     sets none; may be null
+   * @throws IllegalArgumentException when a catalog is named without an implementation, or the
+   *     format version is not a number
    */
   public static IcebergFormatConfig of(Properties tableConfig, Configuration hadoopConf) {
     String namespace = tableConfig.getProperty(NAMESPACE);
     return new IcebergFormatConfig(
         catalogConfig(tableConfig, hadoopConf),
-        namespace == null || namespace.isEmpty() ? null : namespace.split("\\."));
+        namespace == null || namespace.isEmpty() ? null : namespace.split("\\."),
+        formatVersion(tableConfig, hadoopConf));
+  }
+
+  private static int formatVersion(Properties tableConfig, Configuration hadoopConf) {
+    String version = tableConfig.getProperty(FORMAT_VERSION);
+    if (version == null && hadoopConf != null) {
+      version = hadoopConf.get(IcebergTableManager.ICEBERG_FORMAT_VERSION);
+    }
+    return version == null ? DEFAULT_FORMAT_VERSION : Integer.parseInt(version.trim());
   }
 
   private static IcebergCatalogConfig catalogConfig(

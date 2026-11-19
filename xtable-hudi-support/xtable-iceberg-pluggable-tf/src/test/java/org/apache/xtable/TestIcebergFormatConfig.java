@@ -34,6 +34,7 @@ import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
 
 import org.apache.xtable.iceberg.IcebergCatalogConfig;
+import org.apache.xtable.iceberg.IcebergTableManager;
 
 class TestIcebergFormatConfig {
 
@@ -156,5 +157,36 @@ class TestIcebergFormatConfig {
     Properties tableConfig = new Properties();
     tableConfig.setProperty(IcebergFormatConfig.CATALOG_NAME, "table_catalog");
     assertThrows(IllegalArgumentException.class, () -> new IcebergTableFormat().init(tableConfig));
+
+    Properties badVersion = new Properties();
+    badVersion.setProperty(IcebergFormatConfig.FORMAT_VERSION, "three");
+    assertThrows(NumberFormatException.class, () -> new IcebergTableFormat().init(badVersion));
+  }
+
+  @Test
+  void formatVersionDefaultsToThree() {
+    assertEquals(3, IcebergFormatConfig.of(new Properties(), null).getFormatVersion());
+    assertEquals(
+        3, IcebergFormatConfig.of(new Properties(), new Configuration(false)).getFormatVersion());
+  }
+
+  @Test
+  void formatVersionFallsBackToTheHadoopConfWhenSetThere() {
+    Configuration conf = new Configuration(false);
+    conf.set(IcebergTableManager.ICEBERG_FORMAT_VERSION, "2");
+    assertEquals(2, IcebergFormatConfig.of(new Properties(), conf).getFormatVersion());
+  }
+
+  @Test
+  void formatVersionFromTheTableConfigWinsOverTheHadoopConf() {
+    Configuration conf = new Configuration(false);
+    conf.set(IcebergTableManager.ICEBERG_FORMAT_VERSION, "3");
+    Properties tableConfig = new Properties();
+    tableConfig.setProperty(IcebergFormatConfig.FORMAT_VERSION, "2");
+    assertEquals(2, IcebergFormatConfig.of(tableConfig, conf).getFormatVersion());
+
+    tableConfig.setProperty(IcebergFormatConfig.FORMAT_VERSION, "3");
+    conf.set(IcebergTableManager.ICEBERG_FORMAT_VERSION, "2");
+    assertEquals(3, IcebergFormatConfig.of(tableConfig, conf).getFormatVersion());
   }
 }
