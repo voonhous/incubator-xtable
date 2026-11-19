@@ -125,7 +125,7 @@
             <scope>provided</scope>
         </dependency>
 
-        <!-- Iceberg 1.9.2 needs Avro 1.12, newer than Spark 3.4's -->
+        <!-- Iceberg 1.11 needs Avro 1.12, newer than Spark 3.4's -->
         <dependency>
             <groupId>org.apache.avro</groupId>
             <artifactId>avro</artifactId>
