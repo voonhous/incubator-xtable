@@ -91,7 +91,7 @@ public class IcebergFormatConfig {
    * @param hadoopConf consulted for the catalog and the format version only when the table config
    *     sets none; may be null
    * @throws IllegalArgumentException when a catalog is named without an implementation, or the
-   *     format version is not a number
+   *     format version is not 2 or 3
    */
   public static IcebergFormatConfig of(Properties tableConfig, Configuration hadoopConf) {
     String namespace = tableConfig.getProperty(NAMESPACE);
@@ -106,7 +106,15 @@ public class IcebergFormatConfig {
     if (version == null && hadoopConf != null) {
       version = hadoopConf.get(IcebergTableManager.ICEBERG_FORMAT_VERSION);
     }
-    return version == null ? DEFAULT_FORMAT_VERSION : Integer.parseInt(version.trim());
+    if (version == null) {
+      return DEFAULT_FORMAT_VERSION;
+    }
+    String trimmed = version.trim();
+    if (!trimmed.equals("2") && !trimmed.equals("3")) {
+      throw new IllegalArgumentException(
+          String.format("The Iceberg format version must be 2 or 3 but is %s", version));
+    }
+    return Integer.parseInt(trimmed);
   }
 
   private static IcebergCatalogConfig catalogConfig(

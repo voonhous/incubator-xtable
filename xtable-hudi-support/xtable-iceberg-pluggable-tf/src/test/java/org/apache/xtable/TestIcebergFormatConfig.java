@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -158,9 +159,16 @@ class TestIcebergFormatConfig {
     tableConfig.setProperty(IcebergFormatConfig.CATALOG_NAME, "table_catalog");
     assertThrows(IllegalArgumentException.class, () -> new IcebergTableFormat().init(tableConfig));
 
-    Properties badVersion = new Properties();
-    badVersion.setProperty(IcebergFormatConfig.FORMAT_VERSION, "three");
-    assertThrows(NumberFormatException.class, () -> new IcebergTableFormat().init(badVersion));
+    for (String unsupportedVersion : new String[] {"three", "1", "4"}) {
+      Properties badVersion = new Properties();
+      badVersion.setProperty(IcebergFormatConfig.FORMAT_VERSION, unsupportedVersion);
+      IllegalArgumentException refusal =
+          assertThrows(
+              IllegalArgumentException.class, () -> new IcebergTableFormat().init(badVersion));
+      assertTrue(
+          refusal.getMessage().contains("must be 2 or 3"),
+          unsupportedVersion + ": " + refusal.getMessage());
+    }
   }
 
   @Test

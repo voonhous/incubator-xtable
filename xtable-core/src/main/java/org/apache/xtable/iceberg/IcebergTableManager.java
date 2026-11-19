@@ -109,7 +109,8 @@ public class IcebergTableManager {
         builder.setDefaultPartitionSpec(partitionSpec);
         int formatVersion =
             hadoopConfiguration.getInt(ICEBERG_FORMAT_VERSION, DEFAULT_ICEBERG_FORMAT_VERSION);
-        // upgradeFormatVersion never downgrades, so requesting the default (or lower) is a no-op.
+        // Requesting the version the table was created with is a no-op; Iceberg rejects a lower
+        // one.
         builder.upgradeFormatVersion(formatVersion);
         operations.commit(tableMetadata, builder.build());
         return getTable(catalogConfig, tableIdentifier, basePath);
