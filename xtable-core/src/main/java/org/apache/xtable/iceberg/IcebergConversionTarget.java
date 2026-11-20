@@ -21,6 +21,7 @@ package org.apache.xtable.iceberg;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -63,6 +64,7 @@ import org.apache.xtable.spi.sync.ConversionTarget;
 @Log4j2
 public class IcebergConversionTarget implements ConversionTarget {
   private static final String METADATA_DIR_PATH = "/metadata/";
+  private static final String DELETION_VECTOR_FILE_EXTENSION = ".puffin";
   private IcebergSchemaExtractor schemaExtractor;
   private IcebergSchemaSync schemaSync;
   private IcebergPartitionSpecExtractor partitionSpecExtractor;
@@ -78,6 +80,10 @@ public class IcebergConversionTarget implements ConversionTarget {
   private Table table;
   private InternalTable internalTableState;
   private TableSyncMetadata tableSyncMetadata;
+  /** Null when the next files diff carries no deletion vectors and is applied as an overwrite. */
+  private Map<String, ? extends Collection<Long>> stagedDeletedPositions;
+
+  private boolean stagedPositionsReplaceDeletionVectors;
 
   public IcebergConversionTarget() {}
 
@@ -280,8 +286,33 @@ public class IcebergConversionTarget implements ConversionTarget {
         tableSyncMetadata);
   }
 
+  /**
+   * Stages row positions deleted from data files for the next {@link #syncFilesForDiff}, which then
+   * commits the diff and the positions as one row delta, see {@link
+   * IcebergDataFileUpdatesSync#applyRowDelta}. An empty map still selects the row delta, for a diff
+   * on a table that carries deletion vectors.
+   */
+  public void stageDeletionVectors(
+      Map<String, ? extends Collection<Long>> deletedPositionsByDataFile,
+      boolean replaceDeletionVectors) {
+    this.stagedDeletedPositions = deletedPositionsByDataFile;
+    this.stagedPositionsReplaceDeletionVectors = replaceDeletionVectors;
+  }
+
   @Override
   public void syncFilesForDiff(InternalFilesDiff internalFilesDiff) {
+    if (stagedDeletedPositions != null) {
+      dataFileUpdatesExtractor.applyRowDelta(
+          table,
+          transaction,
+          internalFilesDiff,
+          stagedDeletedPositions,
+          stagedPositionsReplaceDeletionVectors,
+          transaction.table().schema(),
+          transaction.table().spec(),
+          tableSyncMetadata);
+      return;
+    }
     dataFileUpdatesExtractor.applyDiff(
         transaction,
         internalFilesDiff,
@@ -304,8 +335,14 @@ public class IcebergConversionTarget implements ConversionTarget {
     resetTransactionState();
   }
 
+  /**
+   * Data files belong to the source table and are never deleted here. Deletion vector files are
+   * written by this target next to them, so they are deleted once no retained snapshot references
+   * them.
+   */
   private void safeDelete(String file) {
-    if (file.startsWith(new Path(basePath) + METADATA_DIR_PATH)) {
+    if (file.startsWith(new Path(basePath) + METADATA_DIR_PATH)
+        || file.endsWith(DELETION_VECTOR_FILE_EXTENSION)) {
       table.io().deleteFile(file);
     }
   }
@@ -376,6 +413,7 @@ public class IcebergConversionTarget implements ConversionTarget {
     transaction = null;
     internalTableState = null;
     tableSyncMetadata = null;
+    stagedDeletedPositions = null;
   }
 
   private void rollbackCorruptCommits() {

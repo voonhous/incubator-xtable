@@ -31,6 +31,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
+import java.util.Properties;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -88,30 +89,33 @@ class ITIcebergUnsupportedOperations {
   }
 
   @Test
-  void mergeOnReadTableIsRejectedWhenTheTableIsCreated() {
+  void mergeOnReadTableAtFormatVersionTwoIsRejectedWhenTheTableIsCreated() {
     String tableName = "mor_" + UUID.randomUUID();
-    // Log files never become Iceberg data files, so the format refuses the table as soon as Hudi
-    // loads it, rather than publishing snapshots that silently miss every update.
+    Properties formatVersionTwo = new Properties();
+    formatVersionTwo.setProperty(IcebergFormatConfig.FORMAT_VERSION, "2");
+    // A merge-on-read table is published with deletion vectors, which format version 2 lacks, so
+    // the format refuses the table as soon as Hudi loads it.
     Exception exception =
         assertThrows(
             Exception.class,
             () ->
                 TestJavaHudiTable.forStandardSchema(
-                        tableName, tempDir, null, HoodieTableType.MERGE_ON_READ)
+                        tableName, tempDir, null, HoodieTableType.MERGE_ON_READ, formatVersionTwo)
                     .close());
     Throwable rootCause = rootCause(exception);
     assertTrue(
         rootCause instanceof UnsupportedOperationException
-            && rootCause.getMessage().contains("MERGE_ON_READ"),
-        "merge-on-read must be refused as unsupported: " + exception);
+            && rootCause.getMessage().contains("MERGE_ON_READ")
+            && rootCause.getMessage().contains("format version 2"),
+        "merge-on-read at format version 2 must be refused as unsupported: " + exception);
     Path basePath = tempDir.resolve(tableName + "_v1");
     assertFalse(
         IcebergTableAssertions.icebergTableExists(basePath.toUri().toString()),
-        "no Iceberg table may be created for a merge-on-read table");
+        "no Iceberg table may be created for the refused table");
     assertEquals(
         Collections.emptyList(),
         instantFiles(basePath.resolve(".hoodie").resolve("timeline")),
-        "no Hudi instant may be written for a merge-on-read table");
+        "no Hudi instant may be written for the refused table");
   }
 
   @SneakyThrows

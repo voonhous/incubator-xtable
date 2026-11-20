@@ -111,9 +111,8 @@ public class IcebergTableFormat implements HoodieTableFormat {
   @Override
   public void init(Properties properties) {
     HoodieConfig tableConfig = new HoodieConfig(TypedProperties.copy(properties));
-    requireCopyOnWrite(tableConfig);
     requireTableVersionEightOrLater(tableConfig);
-    IcebergFormatConfig.of(properties, null);
+    requireDeletionVectorsForMergeOnRead(tableConfig, IcebergFormatConfig.of(properties, null));
     this.tableFormatSync = TableFormatSync.getInstance();
   }
 
@@ -131,8 +130,18 @@ public class IcebergTableFormat implements HoodieTableFormat {
       FileSystemViewManager viewManager) {
     HudiIncrementalTableChangeExtractor hudiTableExtractor =
         getHudiTableExtractor(metaClient, viewManager);
-    completeInstant(
-        metaClient, hudiTableExtractor.extractTableChanges(commitMetadata, completedInstant));
+    IncrementalTableChanges changes =
+        hudiTableExtractor.extractTableChanges(commitMetadata, completedInstant);
+    if (isMergeOnRead(metaClient.getTableConfig())) {
+      completeInstant(
+          metaClient,
+          changes,
+          new HudiPositionalDeleteExtractor(metaClient, viewManager)
+              .positionsDeletedBy(commitMetadata, completedInstant),
+          false);
+    } else {
+      completeInstant(metaClient, changes);
+    }
   }
 
   @Override
@@ -313,7 +322,19 @@ public class IcebergTableFormat implements HoodieTableFormat {
               publishedCommitTimes,
               filesRemovedByRolledBackCommits);
     }
-    completeInstant(metaClient, changes);
+    if (isMergeOnRead(metaClient.getTableConfig())) {
+      // The log files the rollback deleted no longer delete anything, and a base file it restored
+      // is deleted from by the log files its file group still has.
+      completeInstant(
+          metaClient,
+          changes,
+          new HudiPositionalDeleteExtractor(metaClient, viewManager)
+              .positionsDeletedAfter(
+                  rollbackMetadata, publishedCommitTimes, filesRemovedByRolledBackCommits),
+          true);
+    } else {
+      completeInstant(metaClient, changes);
+    }
   }
 
   private InternalTable tableAsRecordedInIceberg(
@@ -418,7 +439,24 @@ public class IcebergTableFormat implements HoodieTableFormat {
   }
 
   private void completeInstant(HoodieTableMetaClient metaClient, IncrementalTableChanges changes) {
+    completeInstant(metaClient, changes, null, false);
+  }
+
+  /**
+   * @param deletedPositionsByBaseFile row positions deleted from base files, to record as deletion
+   *     vectors in the snapshot of the instant; null for an instant of a table without any
+   * @param replaceDeletionVectors whether the positions replace the current deletion vector of each
+   *     base file rather than being merged into it
+   */
+  private void completeInstant(
+      HoodieTableMetaClient metaClient,
+      IncrementalTableChanges changes,
+      Map<String, Set<Long>> deletedPositionsByBaseFile,
+      boolean replaceDeletionVectors) {
     IcebergConversionTarget target = getIcebergConversionTarget(metaClient);
+    if (deletedPositionsByBaseFile != null) {
+      target.stageDeletionVectors(deletedPositionsByBaseFile, replaceDeletionVectors);
+    }
     TableSyncMetadata tableSyncMetadata =
         target
             .getTableMetadata()
@@ -469,22 +507,31 @@ public class IcebergTableFormat implements HoodieTableFormat {
   }
 
   /**
-   * Only copy-on-write tables are supported. {@link HudiDataFileExtractor} skips log files, so a
-   * deltacommit that writes only log files would publish an empty snapshot and Iceberg readers
-   * would silently miss every update and delete in it.
+   * A merge-on-read table is published as base files with deletion vectors, which Iceberg has from
+   * format version 3 on. The table type and the configured version are known before any instant
+   * exists; whether the writer keeps its log files to positional deletes is not, and is checked as
+   * each deltacommit is published, see {@link HudiPositionalDeleteExtractor}.
    *
-   * @throws UnsupportedOperationException when the table is merge-on-read
+   * @throws UnsupportedOperationException when the table is merge-on-read and set to an Iceberg
+   *     format version below 3
    */
-  static void requireCopyOnWrite(HoodieConfig tableConfig) {
-    String tableType = tableConfig.getStringOrDefault(HoodieTableConfig.TYPE);
-    if (!HoodieTableType.COPY_ON_WRITE.name().equals(tableType)) {
+  static void requireDeletionVectorsForMergeOnRead(
+      HoodieConfig tableConfig, IcebergFormatConfig formatConfig) {
+    if (isMergeOnRead(tableConfig) && formatConfig.getFormatVersion() < 3) {
       throw new UnsupportedOperationException(
           String.format(
-              "The Iceberg table format only supports %s tables, but table %s is %s",
-              HoodieTableType.COPY_ON_WRITE,
+              "The Iceberg table format publishes a %s table with deletion vectors, which need"
+                  + " Iceberg format version 3, but table %s is set to format version %d",
+              HoodieTableType.MERGE_ON_READ,
               tableConfig.getStringOrDefault(HoodieTableConfig.NAME, ""),
-              tableType));
+              formatConfig.getFormatVersion()));
     }
+  }
+
+  private static boolean isMergeOnRead(HoodieConfig tableConfig) {
+    return HoodieTableType.MERGE_ON_READ
+        .name()
+        .equals(tableConfig.getStringOrDefault(HoodieTableConfig.TYPE));
   }
 
   /**
@@ -560,7 +607,9 @@ public class IcebergTableFormat implements HoodieTableFormat {
 
   private HudiIncrementalTableChangeExtractor getHudiTableExtractor(
       HoodieTableMetaClient metaClient, FileSystemViewManager viewManager) {
-    requireCopyOnWrite(metaClient.getTableConfig());
+    // The Hadoop configuration can also set the format version, which init does not see.
+    requireDeletionVectorsForMergeOnRead(
+        metaClient.getTableConfig(), IcebergFormatConfig.of(metaClient));
     String partitionSpec = partitionFieldSpec(metaClient.getTableConfig());
     final PathBasedPartitionSpecExtractor sourcePartitionSpecExtractor =
         HudiSourceConfig.fromPartitionFieldSpecConfig(partitionSpec)
