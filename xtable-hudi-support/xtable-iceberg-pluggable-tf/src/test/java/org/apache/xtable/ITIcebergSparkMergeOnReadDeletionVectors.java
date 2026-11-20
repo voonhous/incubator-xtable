@@ -63,7 +63,7 @@ class ITIcebergSparkMergeOnReadDeletionVectors {
   @AfterAll
   static void teardown() {
     if (spark != null) {
-      spark.close();
+      spark.stop();
     }
   }
 

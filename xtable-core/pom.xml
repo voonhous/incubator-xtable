@@ -111,7 +111,7 @@
         <!-- Delta dependencies -->
         <dependency>
             <groupId>io.delta</groupId>
-            <artifactId>delta-core_${scala.binary.version}</artifactId>
+            <artifactId>${delta.artifact.prefix}_${scala.binary.version}</artifactId>
             <scope>provided</scope>
         </dependency>
         <dependency>
@@ -139,7 +139,7 @@
         </dependency>
         <dependency>
             <groupId>org.apache.paimon</groupId>
-            <artifactId>paimon-spark-${spark.version.prefix}</artifactId>
+            <artifactId>paimon-spark-${paimon.spark.version.prefix}</artifactId>
             <scope>test</scope>
         </dependency>
 

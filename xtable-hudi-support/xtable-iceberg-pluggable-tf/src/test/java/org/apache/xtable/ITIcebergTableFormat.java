@@ -119,7 +119,7 @@ public class ITIcebergTableFormat {
       jsc.close();
     }
     if (sparkSession != null) {
-      sparkSession.close();
+      sparkSession.stop();
     }
   }
 
