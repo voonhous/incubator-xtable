@@ -175,7 +175,7 @@ public class TestIcebergTableManager {
   }
 
   @Test
-  void catalogLoadsWhenTheContextClassLoaderCannotSeeIt() throws Exception {
+  void catalogOperationsWorkWhenTheContextClassLoaderCannotSeeTheCatalog() throws Exception {
     // A shared ForkJoin pool thread has the system class loader as its context loader, which
     // cannot see jars added at runtime; a loader that sees only the JDK stands in for it here.
     String catalogName = "catalogFromAnotherLoader";
@@ -186,7 +186,17 @@ public class TestIcebergTableManager {
             .catalogName(catalogName)
             .catalogOptions(OPTIONS)
             .build();
-    when(mockCatalog.tableExists(IDENTIFIER)).thenReturn(true);
+    // Catalogs load more classes lazily through the context class loader, for example the AWS
+    // catalogs' HTTP client configuration on the first S3 read.
+    when(mockCatalog.tableExists(IDENTIFIER))
+        .thenAnswer(
+            invocation -> {
+              Class.forName(
+                  StubCatalog.class.getName(),
+                  true,
+                  Thread.currentThread().getContextClassLoader());
+              return true;
+            });
     IcebergTableManager tableManager = IcebergTableManager.of(CONFIGURATION);
 
     AtomicReference<Object> result = new AtomicReference<>();

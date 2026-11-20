@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -59,19 +60,37 @@ public class IcebergTableManager {
 
   public Table getTable(
       IcebergCatalogConfig catalogConfig, TableIdentifier tableIdentifier, String basePath) {
-    return getCatalog(catalogConfig)
-        .map(catalog -> catalog.loadTable(tableIdentifier))
-        .orElseGet(() -> getHadoopTables().load(basePath));
+    return withCatalogClassLoader(
+        catalogConfig,
+        () ->
+            getCatalog(catalogConfig)
+                .map(catalog -> catalog.loadTable(tableIdentifier))
+                .orElseGet(() -> getHadoopTables().load(basePath)));
   }
 
   public boolean tableExists(
       IcebergCatalogConfig catalogConfig, TableIdentifier tableIdentifier, String basePath) {
-    return getCatalog(catalogConfig)
-        .map(catalog -> catalog.tableExists(tableIdentifier))
-        .orElseGet(() -> getHadoopTables().exists(basePath));
+    return withCatalogClassLoader(
+        catalogConfig,
+        () ->
+            getCatalog(catalogConfig)
+                .map(catalog -> catalog.tableExists(tableIdentifier))
+                .orElseGet(() -> getHadoopTables().exists(basePath)));
   }
 
   Table getOrCreateTable(
+      IcebergCatalogConfig catalogConfig,
+      TableIdentifier tableIdentifier,
+      String basePath,
+      Schema schema,
+      PartitionSpec partitionSpec) {
+    return withCatalogClassLoader(
+        catalogConfig,
+        () ->
+            createTableIfMissing(catalogConfig, tableIdentifier, basePath, schema, partitionSpec));
+  }
+
+  private Table createTableIfMissing(
       IcebergCatalogConfig catalogConfig,
       TableIdentifier tableIdentifier,
       String basePath,
@@ -128,23 +147,34 @@ public class IcebergTableManager {
     return Optional.ofNullable(CATALOG_CACHE.computeIfAbsent(catalogConfig, this::loadCatalog));
   }
 
+  private Catalog loadCatalog(IcebergCatalogConfig config) {
+    return CatalogUtil.loadCatalog(
+        config.getCatalogImpl(),
+        config.getCatalogName(),
+        config.getCatalogOptions(),
+        hadoopConfiguration);
+  }
+
   /**
-   * Iceberg resolves the catalog class, and the classes the catalog loads while it initializes,
+   * Runs a catalog operation with a context class loader that can see the catalog. Iceberg loads
+   * the catalog class, and classes the catalog loads later such as its HTTP client configuration,
    * through the thread's context class loader. On a shared ForkJoin pool thread (a parallel stream)
    * that is the system class loader, which cannot see jars added at runtime such as Spark's {@code
-   * --jars}, so the context loader is swapped for this class's loader when it cannot see the
-   * catalog class.
+   * --jars}.
    */
-  private Catalog loadCatalog(IcebergCatalogConfig config) {
+  private static <T> T withCatalogClassLoader(IcebergCatalogConfig config, Supplier<T> action) {
+    if (config == null) {
+      return action.get();
+    }
     Thread thread = Thread.currentThread();
     ClassLoader previous = thread.getContextClassLoader();
-    thread.setContextClassLoader(catalogClassLoader(config.getCatalogImpl(), previous));
+    ClassLoader loader = catalogClassLoader(config.getCatalogImpl(), previous);
+    if (loader == previous) {
+      return action.get();
+    }
+    thread.setContextClassLoader(loader);
     try {
-      return CatalogUtil.loadCatalog(
-          config.getCatalogImpl(),
-          config.getCatalogName(),
-          config.getCatalogOptions(),
-          hadoopConfiguration);
+      return action.get();
     } finally {
       thread.setContextClassLoader(previous);
     }
