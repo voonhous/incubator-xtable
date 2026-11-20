@@ -125,14 +125,40 @@ public class IcebergTableManager {
     if (catalogConfig == null) {
       return Optional.empty();
     }
-    return Optional.ofNullable(
-        CATALOG_CACHE.computeIfAbsent(
-            catalogConfig,
-            config ->
-                CatalogUtil.loadCatalog(
-                    config.getCatalogImpl(),
-                    config.getCatalogName(),
-                    config.getCatalogOptions(),
-                    hadoopConfiguration)));
+    return Optional.ofNullable(CATALOG_CACHE.computeIfAbsent(catalogConfig, this::loadCatalog));
+  }
+
+  /**
+   * Iceberg resolves the catalog class, and the classes the catalog loads while it initializes,
+   * through the thread's context class loader. On a shared ForkJoin pool thread (a parallel stream)
+   * that is the system class loader, which cannot see jars added at runtime such as Spark's {@code
+   * --jars}, so the context loader is swapped for this class's loader when it cannot see the
+   * catalog class.
+   */
+  private Catalog loadCatalog(IcebergCatalogConfig config) {
+    Thread thread = Thread.currentThread();
+    ClassLoader previous = thread.getContextClassLoader();
+    thread.setContextClassLoader(catalogClassLoader(config.getCatalogImpl(), previous));
+    try {
+      return CatalogUtil.loadCatalog(
+          config.getCatalogImpl(),
+          config.getCatalogName(),
+          config.getCatalogOptions(),
+          hadoopConfiguration);
+    } finally {
+      thread.setContextClassLoader(previous);
+    }
+  }
+
+  private static ClassLoader catalogClassLoader(String catalogImpl, ClassLoader contextLoader) {
+    if (contextLoader != null) {
+      try {
+        Class.forName(catalogImpl, false, contextLoader);
+        return contextLoader;
+      } catch (ClassNotFoundException e) {
+        log.debug("Catalog {} is not visible to the context class loader", catalogImpl);
+      }
+    }
+    return IcebergTableManager.class.getClassLoader();
   }
 }
