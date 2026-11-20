@@ -660,7 +660,9 @@ public class IcebergTableFormat implements HoodieTableFormat {
         sourcePartitionSpecExtractor(metaClient.getTableConfig());
     return new HudiIncrementalTableChangeExtractor(
         metaClient,
-        new HudiTableExtractor(new HudiSchemaExtractor(), sourcePartitionSpecExtractor),
+        // The Iceberg schema is the table's own columns. The base files also store Hudi's meta
+        // columns, which Iceberg readers skip, as they resolve columns through the name mapping.
+        new HudiTableExtractor(new HudiSchemaExtractor(), sourcePartitionSpecExtractor, false),
         new HudiDataFileExtractor(
             metaClient,
             new PathBasedPartitionValuesExtractor(

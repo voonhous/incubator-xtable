@@ -35,7 +35,6 @@ import lombok.SneakyThrows;
 
 import org.apache.hadoop.conf.Configuration;
 
-import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
@@ -91,18 +90,16 @@ final class IcebergTableAssertions {
    * Rows read through Iceberg's own reader, which plans and splits the data files the way any
    * Iceberg engine does and reads them back, rather than trusting the record counts in metadata.
    *
-   * <p>Only the commit-time column is projected. The generic reader ignores the table's name
-   * mapping, so it resolves Parquet columns by position: top-level columns line up, nested fields
-   * do not and fail with a missing required field. The row count is the same whichever column is
-   * read.
+   * <p>No column is projected. The generic reader ignores the table's name mapping and resolves the
+   * columns of Hudi's base files, which carry no field ids, by position, so a column it reads holds
+   * the values of another column, see {@code ITIcebergMetaColumns}. The row count does not depend
+   * on the columns read.
    */
   @SneakyThrows
   static long icebergRowCount(String basePath) {
     long count = 0;
     try (CloseableIterable<Record> records =
-        IcebergGenerics.read(icebergTable(basePath))
-            .select(HoodieRecord.COMMIT_TIME_METADATA_FIELD)
-            .build()) {
+        IcebergGenerics.read(icebergTable(basePath)).select().build()) {
       for (Record ignored : records) {
         count++;
       }

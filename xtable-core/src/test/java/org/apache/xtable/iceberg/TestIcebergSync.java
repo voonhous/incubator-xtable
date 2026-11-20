@@ -44,6 +44,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -260,6 +261,81 @@ public class TestIcebergSync {
             Collections.singletonList(getConversionTarget(configuration)),
             buildSnapshot(table, "1", dataFile1, dataFile2));
     assertRowLineageMapping(formatVersion == 3);
+  }
+
+  /**
+   * A table without a name mapping gets one with the field ids of its own schema. A source without
+   * field ids has its columns numbered in order, which differs from the ids of a table that had a
+   * column dropped and another added.
+   */
+  @Test
+  public void testMissingNameMappingIsCreatedWithTheFieldIdsOfTheTable() {
+    InternalTable table =
+        getInternalTable(tableName, basePath, internalSchema, null, LAST_COMMIT_TIME);
+    when(mockSchemaExtractor.toIceberg(internalSchema)).thenReturn(icebergSchema);
+    when(mockPartitionSpecExtractor.toIceberg(eq(null), any()))
+        .thenReturn(PartitionSpec.unpartitioned());
+    InternalDataFile dataFile1 = getDataFile(1, Collections.emptyList());
+    InternalDataFile dataFile2 = getDataFile(2, Collections.emptyList());
+    mockColStatsForFile(dataFile1, 1);
+    mockColStatsForFile(dataFile2, 1);
+    TableFormatSync.getInstance()
+        .syncSnapshot(
+            Collections.singletonList(conversionTarget), buildSnapshot(table, "0", dataFile1));
+
+    Table icebergTable = new HadoopTables(CONFIGURATION).load(basePath.toString());
+    icebergTable
+        .updateSchema()
+        .deleteColumn("date_field")
+        .addColumn("added_field", Types.StringType.get())
+        .commit();
+    icebergTable.updateProperties().remove(TableProperties.DEFAULT_NAME_MAPPING).commit();
+
+    // The columns of the table as the source describes them after the change, numbered in order.
+    InternalSchema evolvedInternalSchema = internalSchema.toBuilder().name("evolved").build();
+    Schema evolvedSchemaNumberedInOrder =
+        new Schema(
+            Types.NestedField.required(1, "timestamp_field", Types.TimestampType.withoutZone()),
+            Types.NestedField.required(2, "group_id", Types.IntegerType.get()),
+            Types.NestedField.required(
+                3,
+                "record",
+                Types.StructType.of(
+                    Types.NestedField.required(5, "string_field", Types.StringType.get()))),
+            Types.NestedField.optional(4, "added_field", Types.StringType.get()));
+    when(mockSchemaExtractor.toIceberg(evolvedInternalSchema))
+        .thenReturn(evolvedSchemaNumberedInOrder);
+    TableFormatSync.getInstance()
+        .syncSnapshot(
+            Collections.singletonList(getConversionTarget()),
+            buildSnapshot(
+                getInternalTable(
+                    tableName, basePath, evolvedInternalSchema, null, LAST_COMMIT_TIME),
+                "1",
+                dataFile1,
+                dataFile2));
+
+    Table synced = new HadoopTables(CONFIGURATION).load(basePath.toString());
+    NameMapping mapping =
+        NameMappingParser.fromJson(synced.properties().get(TableProperties.DEFAULT_NAME_MAPPING));
+    Map<String, Integer> mappedIds = new HashMap<>();
+    for (String column :
+        Arrays.asList(
+            "timestamp_field", "group_id", "record", "record.string_field", "added_field")) {
+      assertEquals(
+          synced.schema().findField(column).fieldId(),
+          mapping.find(column).id().intValue(),
+          "id of " + column);
+      mappedIds.put(column, mapping.find(column).id());
+    }
+    Map<String, Integer> expectedIds = new HashMap<>();
+    expectedIds.put("timestamp_field", 3);
+    expectedIds.put("group_id", 1);
+    expectedIds.put("record", 4);
+    expectedIds.put("record.string_field", 5);
+    expectedIds.put("added_field", 6);
+    assertEquals(expectedIds, mappedIds);
+    assertNull(mapping.find("date_field"));
   }
 
   private void assertRowLineageMapping(boolean mapped) {

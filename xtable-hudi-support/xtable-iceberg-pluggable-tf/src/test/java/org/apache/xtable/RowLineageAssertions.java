@@ -23,7 +23,10 @@ import static org.apache.xtable.IcebergTableAssertions.icebergTable;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -58,10 +61,12 @@ import org.apache.iceberg.data.Record;
 import org.apache.iceberg.data.parquet.GenericParquetReaders;
 import org.apache.iceberg.deletes.PositionDeleteIndex;
 import org.apache.iceberg.io.CloseableIterable;
+import org.apache.iceberg.mapping.MappedField;
 import org.apache.iceberg.mapping.NameMapping;
 import org.apache.iceberg.mapping.NameMappingParser;
 import org.apache.iceberg.parquet.Parquet;
 import org.apache.iceberg.types.TypeUtil;
+import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.PartitionUtil;
 
 import org.apache.xtable.timeline.IcebergSnapshotInstants;
@@ -72,6 +77,9 @@ import org.apache.xtable.timeline.IcebergSnapshotInstants;
  * row.
  */
 final class RowLineageAssertions {
+  /** The column of the test tables that holds the record key. */
+  private static final String RECORD_KEY_COLUMN = "key";
+
   private RowLineageAssertions() {}
 
   /**
@@ -144,34 +152,54 @@ final class RowLineageAssertions {
     return throughSpark;
   }
 
+  /**
+   * Hudi's meta columns are not part of the Iceberg schema, so they are read through Hudi and
+   * matched to the rows Iceberg reads by record key, which the tables of these tests keep in the
+   * {@value #RECORD_KEY_COLUMN} column.
+   */
   private static Map<String, RowLineage> rowLineageThroughSpark(
       SparkSession spark, String basePath) {
+    Map<String, Row> hudiMetaFieldsByKey = new HashMap<>();
+    for (Row row :
+        spark
+            .read()
+            .format("hudi")
+            .load(basePath)
+            .selectExpr(
+                HoodieRecord.RECORD_KEY_METADATA_FIELD,
+                HoodieRecord.COMMIT_TIME_METADATA_FIELD,
+                HoodieRecord.COMMIT_SEQNO_METADATA_FIELD)
+            .collectAsList()) {
+      Row previous = hudiMetaFieldsByKey.put(row.getString(0), row);
+      assertEquals(null, previous, "duplicate record key " + row.getString(0) + " read by Hudi");
+    }
     List<Row> rows =
         spark
             .read()
             .format("iceberg")
             .load(basePath)
             .selectExpr(
-                HoodieRecord.RECORD_KEY_METADATA_FIELD,
-                HoodieRecord.COMMIT_TIME_METADATA_FIELD,
-                HoodieRecord.COMMIT_SEQNO_METADATA_FIELD,
+                RECORD_KEY_COLUMN,
                 MetadataColumns.FILE_PATH.name(),
                 MetadataColumns.ROW_ID.name(),
                 MetadataColumns.LAST_UPDATED_SEQUENCE_NUMBER.name())
             .collectAsList();
     Map<String, RowLineage> lineage = new TreeMap<>();
     for (Row row : rows) {
+      Row hudiMetaFields = hudiMetaFieldsByKey.get(row.getString(0));
+      assertNotNull(hudiMetaFields, "Hudi reads no row with the record key " + row.getString(0));
       RowLineage previous =
           lineage.put(
               row.getString(0),
               new RowLineage(
+                  hudiMetaFields.getString(1),
+                  hudiMetaFields.getString(2),
                   row.getString(1),
-                  row.getString(2),
-                  row.getString(3),
-                  row.getLong(4),
-                  row.getLong(5)));
+                  row.getLong(2),
+                  row.getLong(3)));
       assertEquals(null, previous, "duplicate record key " + row.getString(0));
     }
+    assertEquals(hudiMetaFieldsByKey.keySet(), lineage.keySet(), "record keys Hudi reads");
     return lineage;
   }
 
@@ -179,21 +207,34 @@ final class RowLineageAssertions {
    * Reads every planned data file with Iceberg's generic Parquet readers, applying the table's name
    * mapping and the file's deletion vector. Iceberg's {@code IcebergGenerics} does not apply the
    * name mapping, so it cannot see the values a file without field ids stores.
+   *
+   * <p>The base files store Hudi's meta columns, which the Iceberg schema and so the name mapping
+   * leave out. They are read here under ids no table column has, mapped to their names.
    */
   @SneakyThrows
   private static Map<String, RowLineage> rowLineageThroughIcebergReader(String basePath) {
     Table table = icebergTable(basePath);
     NameMapping nameMapping =
         NameMappingParser.fromJson(table.properties().get(TableProperties.DEFAULT_NAME_MAPPING));
+    List<MappedField> mappedFields = new ArrayList<>(nameMapping.asMappedFields().fields());
+    List<Types.NestedField> columns = new ArrayList<>();
+    columns.add(table.schema().findField(RECORD_KEY_COLUMN));
+    int id = table.schema().highestFieldId();
+    for (String metaColumn :
+        Arrays.asList(
+            HoodieRecord.RECORD_KEY_METADATA_FIELD,
+            HoodieRecord.COMMIT_TIME_METADATA_FIELD,
+            HoodieRecord.COMMIT_SEQNO_METADATA_FIELD)) {
+      assertNull(table.schema().findField(metaColumn), "Iceberg schema has " + metaColumn);
+      assertNull(nameMapping.find(metaColumn), "the name mapping has " + metaColumn);
+      id++;
+      columns.add(Types.NestedField.optional(id, metaColumn, Types.StringType.get()));
+      mappedFields.add(MappedField.of(id, metaColumn));
+    }
+    NameMapping nameMappingWithMetaColumns = NameMapping.of(mappedFields);
     Schema projection =
         TypeUtil.join(
-            MetadataColumns.schemaWithRowLineage(
-                table
-                    .schema()
-                    .select(
-                        HoodieRecord.RECORD_KEY_METADATA_FIELD,
-                        HoodieRecord.COMMIT_TIME_METADATA_FIELD,
-                        HoodieRecord.COMMIT_SEQNO_METADATA_FIELD)),
+            MetadataColumns.schemaWithRowLineage(new Schema(columns)),
             new Schema(MetadataColumns.ROW_POSITION));
     BaseDeleteLoader deleteLoader =
         new BaseDeleteLoader(deleteFile -> table.io().newInputFile(deleteFile.location()));
@@ -210,7 +251,7 @@ final class RowLineageAssertions {
         try (CloseableIterable<Record> records =
             Parquet.read(table.io().newInputFile(dataFile))
                 .project(projection)
-                .withNameMapping(nameMapping)
+                .withNameMapping(nameMappingWithMetaColumns)
                 .createReaderFunc(
                     fileSchema ->
                         GenericParquetReaders.buildReader(projection, fileSchema, constants))
@@ -221,6 +262,10 @@ final class RowLineageAssertions {
               continue;
             }
             String key = (String) record.getField(HoodieRecord.RECORD_KEY_METADATA_FIELD);
+            assertEquals(
+                key,
+                record.getField(RECORD_KEY_COLUMN),
+                "the record key column, read through the name mapping, of a row of " + dataFile);
             RowLineage previous =
                 lineage.put(
                     key,

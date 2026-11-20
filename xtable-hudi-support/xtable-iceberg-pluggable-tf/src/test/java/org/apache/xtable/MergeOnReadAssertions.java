@@ -87,16 +87,9 @@ final class MergeOnReadAssertions {
   static final String UPDATES_AS_DELETES_AND_INSERTS =
       "hoodie.write.updates.as.deletes.and.inserts";
 
+  /** Columns of the table; Hudi's meta columns are not part of the Iceberg schema. */
   private static final String[] COMPARED_COLUMNS = {
-    HoodieRecord.RECORD_KEY_METADATA_FIELD,
-    HoodieRecord.COMMIT_TIME_METADATA_FIELD,
-    HoodieRecord.FILENAME_METADATA_FIELD,
-    "key",
-    "ts",
-    "level",
-    "severity",
-    "long_field",
-    "string_field"
+    "key", "ts", "level", "severity", "long_field", "string_field"
   };
 
   private MergeOnReadAssertions() {}

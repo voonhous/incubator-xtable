@@ -262,6 +262,21 @@ public class TestJavaHudiTable extends TestAbstractHudiTable {
         tableName, schema, tempDir, partitionConfig, tableType, null, false, new Properties());
   }
 
+  /**
+   * Same as {@link #withSchema(String, Path, String, HoodieTableType, Schema)}, with table-level
+   * properties the write config also takes.
+   */
+  public static TestJavaHudiTable withSchema(
+      String tableName,
+      Path tempDir,
+      String partitionConfig,
+      HoodieTableType tableType,
+      Schema schema,
+      Properties tableProperties) {
+    return new TestJavaHudiTable(
+        tableName, schema, tempDir, partitionConfig, tableType, null, false, tableProperties);
+  }
+
   public static TestJavaHudiTable withSchema(
       String tableName,
       Path tempDir,

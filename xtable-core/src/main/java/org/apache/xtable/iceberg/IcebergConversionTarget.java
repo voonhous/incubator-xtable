@@ -266,7 +266,10 @@ public class IcebergConversionTarget implements ConversionTarget {
   public void syncSchema(InternalSchema schema) {
     Schema latestSchema = schemaExtractor.toIceberg(schema);
     if (!transaction.table().properties().containsKey(TableProperties.DEFAULT_NAME_MAPPING)) {
-      createAndSetNameMapping(latestSchema);
+      // The table's own schema has the field ids the data files are read by. latestSchema numbers
+      // the columns of a source without field ids in order, which differs from the table's ids
+      // once a column was dropped or added. The schema update below maintains the mapping.
+      createAndSetNameMapping(transaction.table().schema());
     }
     if (!transaction.table().schema().sameSchema(latestSchema)) {
       boolean hasFieldIds =

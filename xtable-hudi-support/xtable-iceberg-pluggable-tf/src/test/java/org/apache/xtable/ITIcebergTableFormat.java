@@ -87,6 +87,12 @@ import org.apache.xtable.iceberg.IcebergConversionSourceProvider;
 import org.apache.xtable.model.sync.SyncMode;
 
 public class ITIcebergTableFormat {
+  /**
+   * The record key column of every source table. The Iceberg schema leaves out Hudi's meta columns,
+   * so the rows cannot be ordered by {@code _hoodie_record_key} on both sides.
+   */
+  private static final String RECORD_KEY_COLUMN = "key";
+
   @TempDir public static Path tempDir;
   private static final DateTimeFormatter DATE_FORMAT =
       DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS").withZone(ZoneId.of("UTC"));
@@ -478,7 +484,7 @@ public class ITIcebergTableFormat {
             .options(sourceOptions)
             .format(sourceFormat.toLowerCase())
             .load(sourceTable.getBasePath())
-            .orderBy(sourceTable.getOrderByColumn())
+            .orderBy(RECORD_KEY_COLUMN)
             .filter(filterCondition);
     Map<String, Dataset<Row>> targetRowsByFormat =
         targetFormats.stream()
@@ -502,7 +508,7 @@ public class ITIcebergTableFormat {
                           .options(finalTargetOptions)
                           .format(targetFormat.toLowerCase())
                           .load(sourceTable.getDataPath())
-                          .orderBy(sourceTable.getOrderByColumn())
+                          .orderBy(RECORD_KEY_COLUMN)
                           .filter(filterCondition);
                     }));
 
