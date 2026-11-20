@@ -491,7 +491,11 @@ public abstract class TestAbstractHudiTable
         .withCleanConfig(cleanConfig)
         .withArchivalConfig(archivalConfig)
         .withMetadataConfig(metadataConfig)
-        .withWriteConcurrencyMode(WriteConcurrencyMode.OPTIMISTIC_CONCURRENCY_CONTROL)
+        .withWriteConcurrencyMode(
+            WriteConcurrencyMode.valueOf(
+                keyGenProperties.getProperty(
+                    HoodieWriteConfig.WRITE_CONCURRENCY_MODE.key(),
+                    WriteConcurrencyMode.OPTIMISTIC_CONCURRENCY_CONTROL.name())))
         .withMarkersType(MarkerType.DIRECT.name())
         .withStorageConfig(storageConfig)
         .withLockConfig(

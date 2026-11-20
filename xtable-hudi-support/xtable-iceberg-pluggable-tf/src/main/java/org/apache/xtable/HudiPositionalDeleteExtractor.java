@@ -53,6 +53,7 @@ import org.apache.hudi.common.table.view.SyncableFileSystemView;
 import org.apache.hudi.common.util.CompactionUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.core.io.storage.HoodieIOFactory;
+import org.apache.hudi.exception.HoodieWriteConflictException;
 import org.apache.hudi.storage.StoragePath;
 
 import org.apache.xtable.exception.NotSupportedException;
@@ -100,12 +101,7 @@ class HudiPositionalDeleteExtractor {
               HoodieBaseFile baseFile =
                   fsView()
                       .getLatestBaseFile(fileGroup.getPartitionPath(), fileGroup.getFileId())
-                      .orElseThrow(
-                          () ->
-                              new NotSupportedException(
-                                  unsupportedLogContent(
-                                      new HoodieLogFile(logFiles.iterator().next()),
-                                      "records of a file group without a base file")));
+                      .orElseThrow(() -> noBaseFile(fileGroup, logFiles, instant));
               positionsByBaseFile
                   .computeIfAbsent(qualifiedPath(baseFile), path -> new LinkedHashSet<>())
                   .addAll(
@@ -114,6 +110,33 @@ class HudiPositionalDeleteExtractor {
                           logFiles.stream().map(HoodieLogFile::new).collect(Collectors.toList())));
             });
     return positionsByBaseFile;
+  }
+
+  /**
+   * The failure for log files of a file group without a base file to delete from. When a clustering
+   * or another replace commit replaced the file group after the writer looked its rows up, the
+   * deletes apply to no live base file: Hudi rejects that write under optimistic concurrency
+   * control, and a single writer does not check it, so it is refused here as a write conflict.
+   */
+  private RuntimeException noBaseFile(
+      HoodieFileGroupId fileGroup, Set<StoragePath> logFiles, HoodieInstant deltacommit) {
+    boolean replaced =
+        fsView()
+            .getAllReplacedFileGroups(fileGroup.getPartitionPath())
+            .anyMatch(replacedGroup -> replacedGroup.getFileGroupId().equals(fileGroup));
+    if (replaced) {
+      return new HoodieWriteConflictException(
+          HoodieWriteConflictException.ConflictCategory.INGESTION_VS_TABLE_SERVICE,
+          String.format(
+              "Deltacommit %s of table %s deletes rows of file group %s, which a replace commit"
+                  + " such as a clustering replaced after the rows were looked up, so the deletes"
+                  + " apply to no live base file. Retry the write",
+              deltacommit.requestedTime(), metaClient.getTableConfig().getTableName(), fileGroup));
+    }
+    return new NotSupportedException(
+        unsupportedLogContent(
+            new HoodieLogFile(logFiles.iterator().next()),
+            "records of a file group without a base file"));
   }
 
   /**
