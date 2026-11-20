@@ -78,9 +78,12 @@ import org.apache.xtable.model.stat.PartitionValue;
  * file's data sequence number. A rewrite moves rows to a new data file, which gets a new first row
  * id and sequence number, so the rows it carries over unchanged must store the values they had.
  * Both columns are declared to Hudi as format meta columns: Hudi stores them in every base file it
- * rewrites, resolves the values of a carried-over row from the base file it is read from, and
- * leaves them null for a new or updated row, which Iceberg then gives a new row id. An update is
- * therefore a delete and an insert, which the spec allows.
+ * rewrites and resolves the values of a carried-over row from the base file it is read from. A row
+ * that a rewrite updates keeps the row id of the row it replaces and stores a null sequence number,
+ * so it gets the rewrite's sequence number, as in Iceberg. A new row stores null for both, so
+ * Iceberg gives it a new row id. An update that Hudi writes as a delete and an insert into another
+ * file, as merge-on-read with deletion vectors does, gives the row a new row id, which the spec
+ * allows.
  */
 final class IcebergRowLineage {
   private static final List<Types.NestedField> COLUMNS =
@@ -145,6 +148,11 @@ final class IcebergRowLineage {
     @Override
     public Object valueOnWrite(String instantTime) {
       return null;
+    }
+
+    @Override
+    public Object valueOnUpdate(String instantTime, Object replacedValue) {
+      return rowId ? replacedValue : null;
     }
 
     @Override

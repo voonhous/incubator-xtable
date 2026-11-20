@@ -85,6 +85,14 @@ class TestIcebergRowLineage {
   }
 
   @Test
+  void anUpdatedRowKeepsTheRowIdOfTheRowItReplacesAndGetsTheSequenceNumberOfTheRewrite() {
+    List<FormatMetaColumn> columns = declaredColumns("3");
+    assertEquals(7L, columns.get(0).valueOnUpdate("20260101000000000", 7L));
+    assertNull(columns.get(0).valueOnUpdate("20260101000000000", null));
+    assertNull(columns.get(1).valueOnUpdate("20260101000000000", 3L));
+  }
+
+  @Test
   void acceptsABaseFileWithTheRowLineageColumns() throws IOException {
     assertEquals(
         "",

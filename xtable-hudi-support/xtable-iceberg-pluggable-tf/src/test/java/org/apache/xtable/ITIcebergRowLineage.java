@@ -48,7 +48,12 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
+import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -162,25 +167,25 @@ class ITIcebergRowLineage {
       List<HoodieRecord<HoodieAvroPayload>> updates =
           oneRecordPerSharedFile(tracker.current, inserts, 10);
       table.upsertRecords(updates, true);
-      assertRewritten(tracker.next(), 60 - updates.size(), updates.size());
+      assertRewritten(tracker.next(), 60 - updates.size(), updates.size(), updates.size());
 
       // Routed into the existing small base files, which are rewritten with the new records.
       String insert = table.startCommit();
       List<WriteStatus> written = table.getWriteClient().insert(table.generateRecords(6), insert);
       table.commitInstant(insert, written);
-      assertRewritten(tracker.next(), 60, 6);
+      assertRewritten(tracker.next(), 60, 6, 0);
 
       table.cluster();
       Changes clustering = tracker.next();
-      assertChanges(clustering, 66, 0);
+      assertChanges(clustering, 66, 0, 0);
       assertEquals(66, clustering.unchangedMovedToAnotherFile);
 
       table.deleteRecords(inserts.subList(10, 15), true);
-      assertRewritten(tracker.next(), 61, 0);
+      assertRewritten(tracker.next(), 61, 0, 0);
       assertEquals(61, tracker.current.size());
 
       table.upsertRecords(inserts.subList(20, 30), true);
-      assertRewritten(tracker.next(), 51, 10);
+      assertRewritten(tracker.next(), 51, 10, 10);
       assertNothingPending(reconstructedTimeline(basePath));
       assertRowLineageColumnsNotInTable(basePath);
     }
@@ -207,15 +212,15 @@ class ITIcebergRowLineage {
       List<HoodieRecord<HoodieAvroPayload>> updates =
           oneRecordPerSharedFile(tracker.current, inserts, 10);
       table.upsertRecords(updates, true);
-      assertRewritten(tracker.next(), 60 - updates.size(), updates.size());
+      assertRewritten(tracker.next(), 60 - updates.size(), updates.size(), updates.size());
 
       table.cluster();
       Changes clustering = tracker.next();
-      assertChanges(clustering, 60, 0);
+      assertChanges(clustering, 60, 0, 0);
       assertEquals(60, clustering.unchangedMovedToAnotherFile);
 
       table.upsertRecords(inserts.subList(20, 30), true);
-      assertRewritten(tracker.next(), 50, 10);
+      assertRewritten(tracker.next(), 50, 10, 10);
       assertRowLineageColumnsNotInTable(basePath);
     }
   }
@@ -237,31 +242,88 @@ class ITIcebergRowLineage {
 
       // An update is a delete from the base file and an insert into a new one.
       table.upsertRecords(inserts.subList(0, 10), true);
-      assertInPlace(tracker.next(), 70, 10);
+      assertInPlace(tracker.next(), 70, 10, 0);
       table.deleteRecords(inserts.subList(10, 15), true);
-      assertInPlace(tracker.next(), 75, 0);
+      assertInPlace(tracker.next(), 75, 0, 0);
       assertIcebergMatchesHudi(spark, basePath);
 
       table.compact();
       Changes compaction = tracker.next();
-      assertRewritten(compaction, 75, 0);
+      assertRewritten(compaction, 75, 0, 0);
       assertIcebergMatchesHudi(spark, basePath);
 
       table.upsertRecords(inserts.subList(20, 25), true);
-      assertInPlace(tracker.next(), 70, 5);
+      assertInPlace(tracker.next(), 70, 5, 0);
 
       table.cluster();
       Changes clustering = tracker.next();
-      assertChanges(clustering, 75, 0);
+      assertChanges(clustering, 75, 0, 0);
       assertEquals(75, clustering.unchangedMovedToAnotherFile);
 
       table.upsertRecords(inserts.subList(25, 30), true);
-      assertInPlace(tracker.next(), 70, 5);
+      assertInPlace(tracker.next(), 70, 5, 0);
       table.compact();
-      assertRewritten(tracker.next(), 75, 0);
+      assertRewritten(tracker.next(), 75, 0, 0);
       assertIcebergMatchesHudi(spark, basePath);
       assertNothingPending(reconstructedTimeline(basePath));
       assertRowLineageColumnsNotInTable(basePath);
+    }
+  }
+
+  /**
+   * The Spark datasource writer, which Spark SQL UPDATE and MERGE INTO write through, upserts Spark
+   * rows that the merge of each file group writes with the row ids of the rows they replace.
+   */
+  @Test
+  void sparkDatasourceUpsertKeepsTheRowIdsOfTheRowsItUpdates() {
+    String tableName = tableName();
+    String basePath = tempDir.resolve(tableName).toUri().toString();
+    writeThroughDatasource(tableName, basePath, "insert", "1:a", "2:b", "3:c", "4:d");
+    Tracker tracker = new Tracker(basePath);
+
+    writeThroughDatasource(tableName, basePath, "upsert", "1:x");
+    assertRewritten(tracker.next(), 3, 1, 1);
+
+    writeThroughDatasource(tableName, basePath, "upsert", "2:y", "4:z", "5:e");
+    assertRewritten(tracker.next(), 2, 3, 2);
+    assertEquals(5, tracker.current.size());
+  }
+
+  private static void writeThroughDatasource(
+      String tableName, String basePath, String operation, String... rows) {
+    StructType schema =
+        new StructType().add("key", DataTypes.StringType).add("data", DataTypes.StringType);
+    List<Row> data =
+        Arrays.stream(rows)
+            .map(row -> row.split(":"))
+            .map(values -> RowFactory.create(values[0], values[1]))
+            .collect(Collectors.toList());
+    spark
+        .createDataFrame(data, schema)
+        .write()
+        .format("hudi")
+        .option(HoodieTableConfig.NAME.key(), tableName)
+        .option(HoodieTableConfig.TABLE_FORMAT.key(), "ICEBERG")
+        .option(IcebergFormatConfig.FORMAT_VERSION, "3")
+        .option("hoodie.datasource.write.table.type", HoodieTableType.COPY_ON_WRITE.name())
+        .option("hoodie.datasource.write.recordkey.field", "key")
+        .option(
+            "hoodie.datasource.write.keygenerator.class",
+            "org.apache.hudi.keygen.NonpartitionedKeyGenerator")
+        .option("hoodie.datasource.write.operation", operation)
+        .mode(SaveMode.Append)
+        .save(basePath);
+  }
+
+  @Test
+  void mergeOnReadUpdateWrittenAsDeleteAndInsertGivesTheUpdatedRowsNewRowIds() {
+    try (TestJavaHudiTable table =
+        TestJavaHudiTable.forStandardSchema(
+            tableName(), tempDir, null, HoodieTableType.MERGE_ON_READ, deletionVectorTable(10))) {
+      List<HoodieRecord<HoodieAvroPayload>> inserts = table.insertRecords(20, true);
+      Tracker tracker = new Tracker(table.getBasePath());
+      table.upsertRecords(inserts.subList(0, 5), true);
+      assertInPlace(tracker.next(), 15, 5, 0);
     }
   }
 
@@ -280,10 +342,10 @@ class ITIcebergRowLineage {
       List<HoodieRecord<HoodieAvroPayload>> inserts = table.insertRecords(40, true);
       Tracker tracker = new Tracker(basePath);
       table.upsertRecords(inserts.subList(0, 10), true);
-      assertRewritten(tracker.next(), 30, 10);
+      assertRewritten(tracker.next(), 30, 10, 10);
       List<String> rowsBefore = icebergRows(spark, basePath);
       table.upsertRecords(inserts.subList(5, 15), true);
-      assertRewritten(tracker.next(), 30, 10);
+      assertRewritten(tracker.next(), 30, 10, 10);
       String upsert =
           table.getMetaClient().reloadActiveTimeline().lastInstant().get().requestedTime();
 
@@ -293,7 +355,7 @@ class ITIcebergRowLineage {
       assertEquals(40, restored.current.size());
 
       table.upsertRecords(inserts.subList(30, 35), true);
-      assertRewritten(restored.next(), 35, 5);
+      assertRewritten(restored.next(), 35, 5, 5);
     }
   }
 
@@ -499,20 +561,25 @@ class ITIcebergRowLineage {
     throw new AssertionError("no HoodieException with \"" + message + "\" in " + failure, failure);
   }
 
-  private static void assertChanges(Changes changes, int unchanged, int changedOrNew) {
+  private static void assertChanges(
+      Changes changes, int unchanged, int changedOrNew, int updatedKeepingRowId) {
     assertEquals(unchanged, changes.unchanged, "rows carried over unchanged");
     assertEquals(changedOrNew, changes.changedOrNew, "rows changed or new");
+    assertEquals(
+        updatedKeepingRowId, changes.updatedKeepingRowId, "updated rows that kept their row id");
   }
 
   /** An operation that rewrote base files, moving some of the unchanged rows to new files. */
-  private static void assertRewritten(Changes changes, int unchanged, int changedOrNew) {
-    assertChanges(changes, unchanged, changedOrNew);
+  private static void assertRewritten(
+      Changes changes, int unchanged, int changedOrNew, int updatedKeepingRowId) {
+    assertChanges(changes, unchanged, changedOrNew, updatedKeepingRowId);
     assertTrue(changes.unchangedMovedToAnotherFile > 0, "no unchanged row was rewritten");
   }
 
   /** An operation that left every unchanged row in its file. */
-  private static void assertInPlace(Changes changes, int unchanged, int changedOrNew) {
-    assertChanges(changes, unchanged, changedOrNew);
+  private static void assertInPlace(
+      Changes changes, int unchanged, int changedOrNew, int updatedKeepingRowId) {
+    assertChanges(changes, unchanged, changedOrNew, updatedKeepingRowId);
     assertEquals(0, changes.unchangedMovedToAnotherFile, "unchanged rows moved");
   }
 

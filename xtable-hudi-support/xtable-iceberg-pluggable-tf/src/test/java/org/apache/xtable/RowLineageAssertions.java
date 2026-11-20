@@ -137,6 +137,7 @@ final class RowLineageAssertions {
     int unchanged;
     int unchangedMovedToAnotherFile;
     int changedOrNew;
+    int updatedKeepingRowId;
   }
 
   /**
@@ -306,11 +307,11 @@ final class RowLineageAssertions {
 
   /**
    * Checks the row lineage after an operation against the row lineage before it and the Hudi meta
-   * fields. Row ids are unique. A row keeps its row id exactly when it keeps its {@code
-   * _hoodie_commit_seqno}, and then keeps its last updated sequence number too; any other row has a
-   * row id no row had before. Unless {@code sequenceNumberByCommit} is null, every row's last
-   * updated sequence number is the sequence number of the snapshot that recorded its {@code
-   * _hoodie_commit_time}.
+   * fields. Row ids are unique. A row that keeps its {@code _hoodie_commit_seqno} keeps its row id
+   * and its last updated sequence number. A row that an update changed either keeps its row id or
+   * has a row id no row had before, and a new row has a row id no row had before. Unless {@code
+   * sequenceNumberByCommit} is null, every row's last updated sequence number is the sequence
+   * number of the snapshot that recorded its {@code _hoodie_commit_time}.
    */
   static Changes assertRowLineage(
       Map<String, RowLineage> before,
@@ -341,6 +342,9 @@ final class RowLineageAssertions {
             if (!previous.dataFile.equals(lineage.dataFile)) {
               changes.unchangedMovedToAnotherFile++;
             }
+          } else if (previous != null && previous.rowId == lineage.rowId) {
+            changes.changedOrNew++;
+            changes.updatedKeepingRowId++;
           } else {
             assertFalse(
                 rowIdsBefore.contains(lineage.rowId),
