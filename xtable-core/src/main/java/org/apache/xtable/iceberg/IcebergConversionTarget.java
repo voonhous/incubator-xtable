@@ -21,6 +21,7 @@ package org.apache.xtable.iceberg;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
@@ -36,11 +37,13 @@ import org.apache.hadoop.fs.Path;
 
 import org.apache.iceberg.ExpireSnapshots;
 import org.apache.iceberg.HasTableOperations;
+import org.apache.iceberg.MetadataColumns;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
+import org.apache.iceberg.TableUtil;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.UpdateProperties;
 import org.apache.iceberg.catalog.Namespace;
@@ -53,6 +56,7 @@ import org.apache.iceberg.mapping.MappedFields;
 import org.apache.iceberg.mapping.MappingUtil;
 import org.apache.iceberg.mapping.NameMapping;
 import org.apache.iceberg.mapping.NameMappingParser;
+import org.apache.iceberg.types.Types;
 
 import org.apache.xtable.conversion.TargetTable;
 import org.apache.xtable.model.InternalTable;
@@ -200,12 +204,41 @@ public class IcebergConversionTarget implements ConversionTarget {
     NameMapping mapping = MappingUtil.create(schema);
     MappedFields updatedMappedFields =
         updateNameMapping(mapping.asMappedFields(), schemaExtractor.getIdToStorageName());
+    setNameMapping(withRowLineage(NameMapping.of(updatedMappedFields), schema));
+  }
+
+  private void setNameMapping(NameMapping mapping) {
     transaction
         .updateProperties()
-        .set(
-            TableProperties.DEFAULT_NAME_MAPPING,
-            NameMappingParser.toJson(NameMapping.of(updatedMappedFields)))
+        .set(TableProperties.DEFAULT_NAME_MAPPING, NameMappingParser.toJson(mapping))
         .commit();
+  }
+
+  /**
+   * Adds the row lineage columns of a format version 3 table to the name mapping under their
+   * reserved field ids, so that a data file without field ids that stores them, as a rewrite of a
+   * data file does, is read with the stored values rather than with values derived from the file's
+   * first row id and sequence number. Iceberg applies a name mapping only to a file without any
+   * field ids.
+   *
+   * @return the given mapping when it needs no change
+   */
+  private NameMapping withRowLineage(NameMapping mapping, Schema schema) {
+    if (TableUtil.formatVersion(table) < 3) {
+      return mapping;
+    }
+    List<MappedField> fields = new ArrayList<>(mapping.asMappedFields().fields());
+    for (Types.NestedField column :
+        Arrays.asList(MetadataColumns.ROW_ID, MetadataColumns.LAST_UPDATED_SEQUENCE_NUMBER)) {
+      if (mapping.find(column.fieldId()) == null
+          && mapping.find(column.name()) == null
+          && schema.findField(column.name()) == null) {
+        fields.add(MappedField.of(column.fieldId(), column.name()));
+      }
+    }
+    return fields.size() == mapping.asMappedFields().fields().size()
+        ? mapping
+        : NameMapping.of(fields);
   }
 
   private MappedFields updateNameMapping(
@@ -251,6 +284,13 @@ public class IcebergConversionTarget implements ConversionTarget {
       } else {
         schemaSync.sync(transaction.table().schema(), latestSchema, transaction);
       }
+    }
+    NameMapping mapping =
+        NameMappingParser.fromJson(
+            transaction.table().properties().get(TableProperties.DEFAULT_NAME_MAPPING));
+    NameMapping mappingWithRowLineage = withRowLineage(mapping, transaction.table().schema());
+    if (mappingWithRowLineage != mapping) {
+      setNameMapping(mappingWithRowLineage);
     }
   }
 
