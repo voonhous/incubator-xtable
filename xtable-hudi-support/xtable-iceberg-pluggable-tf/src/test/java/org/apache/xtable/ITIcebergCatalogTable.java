@@ -28,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.HashSet;
@@ -37,6 +38,7 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
 import org.apache.hadoop.conf.Configuration;
@@ -46,15 +48,23 @@ import org.junit.jupiter.api.io.TempDir;
 
 import org.apache.hudi.common.model.HoodieAvroPayload;
 import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.storage.StoragePath;
 
+import org.apache.iceberg.CatalogProperties;
+import org.apache.iceberg.DeleteFile;
+import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.inmemory.InMemoryCatalog;
+import org.apache.iceberg.io.CloseableIterable;
+import org.apache.iceberg.metrics.MetricsReport;
+import org.apache.iceberg.metrics.MetricsReporter;
+import org.apache.iceberg.metrics.ScanReport;
 import org.apache.iceberg.types.Types;
 
 import org.apache.xtable.iceberg.IcebergCatalogConfig;
@@ -77,6 +87,18 @@ class ITIcebergCatalogTable {
     public void initialize(String name, Map<String, String> properties) {
       super.initialize(name, properties);
       LOADED.put(name, this);
+    }
+  }
+
+  /** Records the scans planned on the tables of a catalog that names it as metrics reporter. */
+  public static class RecordingScans implements MetricsReporter {
+    static final List<ScanReport> SCANS = new CopyOnWriteArrayList<>();
+
+    @Override
+    public void report(MetricsReport report) {
+      if (report instanceof ScanReport) {
+        SCANS.add((ScanReport) report);
+      }
     }
   }
 
@@ -184,6 +206,67 @@ class ITIcebergCatalogTable {
       assertIcebergReferencesExactly(rolledBack, Collections.emptyList());
       assertMatchesHudi(table, rolledBack, Collections.singleton(commit1));
       assertNothingPending(reconstructedTimeline(table.getBasePath()));
+    }
+  }
+
+  @Test
+  void deletesLookUpTheDeletionVectorsOfTheirOwnPartitionOnly() throws IOException {
+    String catalogName = "catalog_" + UUID.randomUUID().toString().replace('-', '_');
+    IcebergCatalogConfig catalogConfig =
+        IcebergCatalogConfig.builder()
+            .catalogName(catalogName)
+            .catalogImpl(RegisteringInMemoryCatalog.class.getName())
+            .catalogOptions(
+                Collections.singletonMap(
+                    CatalogProperties.METRICS_REPORTER_IMPL, RecordingScans.class.getName()))
+            .build();
+    IcebergTableManager.of(new Configuration()).tableExists(catalogConfig, identifier, "");
+    RegisteringInMemoryCatalog reportingCatalog =
+        RegisteringInMemoryCatalog.LOADED.get(catalogName);
+    reportingCatalog.createNamespace(namespace);
+    Properties properties = MergeOnReadAssertions.deletionVectorTable(9);
+    properties.setProperty(IcebergFormatConfig.CATALOG_NAME, catalogName);
+    properties.setProperty(
+        IcebergFormatConfig.CATALOG_IMPL, RegisteringInMemoryCatalog.class.getName());
+    properties.setProperty(
+        IcebergFormatConfig.CATALOG_OPTION_PREFIX + CatalogProperties.METRICS_REPORTER_IMPL,
+        RecordingScans.class.getName());
+    properties.setProperty(IcebergFormatConfig.NAMESPACE, "db.hudi");
+
+    try (TestJavaHudiTable table =
+        TestJavaHudiTable.forStandardSchema(
+            tableName, tempDir, "level:SIMPLE", HoodieTableType.MERGE_ON_READ, properties)) {
+      List<HoodieRecord<HoodieAvroPayload>> inserts = table.insertRecords(60, true);
+      String partition = inserts.get(0).getPartitionPath();
+      List<HoodieRecord<HoodieAvroPayload>> deletes =
+          inserts.stream()
+              .filter(record -> partition.equals(record.getPartitionPath()))
+              .limit(5)
+              .collect(Collectors.toList());
+      List<String> liveFiles = table.getAllLatestBaseFilePaths();
+      long filesInPartition =
+          liveFiles.stream().filter(path -> path.contains("/" + partition + "/")).count();
+      assertTrue(filesInPartition < liveFiles.size(), "files in more than one partition");
+
+      RecordingScans.SCANS.clear();
+      table.deleteRecords(deletes, true);
+
+      List<ScanReport> scans =
+          RecordingScans.SCANS.stream()
+              .filter(scan -> scan.tableName().endsWith(tableName))
+              .collect(Collectors.toList());
+      assertEquals(1, scans.size(), scans.toString());
+      assertEquals(
+          filesInPartition, scans.get(0).scanMetrics().resultDataFiles().value(), scans.toString());
+      Table icebergTable = reportingCatalog.loadTable(identifier);
+      assertMatchesHudi(table, icebergTable, Collections.emptySet());
+      long deletedRows = 0;
+      try (CloseableIterable<FileScanTask> tasks = icebergTable.newScan().planFiles()) {
+        for (FileScanTask task : tasks) {
+          deletedRows += task.deletes().stream().mapToLong(DeleteFile::recordCount).sum();
+        }
+      }
+      assertEquals(deletes.size(), deletedRows);
     }
   }
 

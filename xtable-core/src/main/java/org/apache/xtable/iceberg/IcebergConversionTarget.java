@@ -56,6 +56,7 @@ import org.apache.xtable.model.InternalTable;
 import org.apache.xtable.model.metadata.TableSyncMetadata;
 import org.apache.xtable.model.schema.InternalPartitionField;
 import org.apache.xtable.model.schema.InternalSchema;
+import org.apache.xtable.model.stat.PartitionValue;
 import org.apache.xtable.model.storage.InternalFilesDiff;
 import org.apache.xtable.model.storage.PartitionFileGroup;
 import org.apache.xtable.model.storage.TableFormat;
@@ -82,6 +83,8 @@ public class IcebergConversionTarget implements ConversionTarget {
   private TableSyncMetadata tableSyncMetadata;
   /** Null when the next files diff carries no deletion vectors and is applied as an overwrite. */
   private Map<String, ? extends Collection<Long>> stagedDeletedPositions;
+
+  private Collection<List<PartitionValue>> stagedPartitionsOfDataFiles;
 
   private boolean stagedPositionsReplaceDeletionVectors;
 
@@ -291,11 +294,16 @@ public class IcebergConversionTarget implements ConversionTarget {
    * commits the diff and the positions as one row delta, see {@link
    * IcebergDataFileUpdatesSync#applyRowDelta}. An empty map still selects the row delta, for a diff
    * on a table that carries deletion vectors.
+   *
+   * @param partitionsOfDataFiles the partitions holding the data files the positions are deleted
+   *     from, to which the lookup of their current deletion vectors is limited
    */
   public void stageDeletionVectors(
       Map<String, ? extends Collection<Long>> deletedPositionsByDataFile,
+      Collection<List<PartitionValue>> partitionsOfDataFiles,
       boolean replaceDeletionVectors) {
     this.stagedDeletedPositions = deletedPositionsByDataFile;
+    this.stagedPartitionsOfDataFiles = partitionsOfDataFiles;
     this.stagedPositionsReplaceDeletionVectors = replaceDeletionVectors;
   }
 
@@ -307,6 +315,7 @@ public class IcebergConversionTarget implements ConversionTarget {
           transaction,
           internalFilesDiff,
           stagedDeletedPositions,
+          stagedPartitionsOfDataFiles,
           stagedPositionsReplaceDeletionVectors,
           transaction.table().schema(),
           transaction.table().spec(),
@@ -414,6 +423,7 @@ public class IcebergConversionTarget implements ConversionTarget {
     internalTableState = null;
     tableSyncMetadata = null;
     stagedDeletedPositions = null;
+    stagedPartitionsOfDataFiles = null;
   }
 
   private void rollbackCorruptCommits() {

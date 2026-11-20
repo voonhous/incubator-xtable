@@ -23,7 +23,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -38,8 +40,12 @@ import lombok.SneakyThrows;
 import org.apache.hadoop.conf.Configuration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
+import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.FileScanTask;
+import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
@@ -49,11 +55,19 @@ import org.apache.iceberg.data.BaseDeleteLoader;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.hadoop.HadoopTables;
 import org.apache.iceberg.io.CloseableIterable;
+import org.apache.iceberg.metrics.ScanMetricsResult;
+import org.apache.iceberg.metrics.ScanReport;
 import org.apache.iceberg.types.Types;
 
 import org.apache.xtable.exception.NotSupportedException;
 import org.apache.xtable.exception.UpdateException;
 import org.apache.xtable.model.metadata.TableSyncMetadata;
+import org.apache.xtable.model.schema.InternalField;
+import org.apache.xtable.model.schema.InternalPartitionField;
+import org.apache.xtable.model.schema.InternalSchema;
+import org.apache.xtable.model.schema.PartitionTransformType;
+import org.apache.xtable.model.stat.PartitionValue;
+import org.apache.xtable.model.stat.Range;
 import org.apache.xtable.model.storage.FileFormat;
 import org.apache.xtable.model.storage.InternalDataFile;
 import org.apache.xtable.model.storage.InternalFilesDiff;
@@ -66,6 +80,13 @@ import org.apache.xtable.model.storage.InternalFilesDiff;
 class TestIcebergDeletionVectorSync {
   private static final Schema SCHEMA =
       new Schema(Types.NestedField.required(1, "id", Types.LongType.get()));
+  private static final Schema PARTITIONED_SCHEMA =
+      new Schema(
+          Types.NestedField.required(1, "id", Types.LongType.get()),
+          Types.NestedField.optional(2, "level", Types.StringType.get()),
+          Types.NestedField.optional(3, "ts", Types.TimestampType.withoutZone()));
+  private static final InternalSchema INTERNAL_PARTITIONED_SCHEMA =
+      IcebergSchemaExtractor.getInstance().fromIceberg(PARTITIONED_SCHEMA);
 
   @TempDir static Path tempDir;
 
@@ -83,14 +104,95 @@ class TestIcebergDeletionVectorSync {
   }
 
   private static InternalDataFile dataFile(Table table, String name) {
+    return dataFile(table, name, Collections.emptyList());
+  }
+
+  private static InternalDataFile dataFile(
+      Table table, String name, List<PartitionValue> partitionValues) {
     return InternalDataFile.builder()
         .physicalPath(table.location() + "/" + name + ".parquet")
         .fileFormat(FileFormat.APACHE_PARQUET)
         .fileSizeBytes(100)
         .recordCount(10)
-        .partitionValues(Collections.emptyList())
+        .partitionValues(partitionValues)
         .columnStats(Collections.emptyList())
         .build();
+  }
+
+  private enum Partitioning {
+    IDENTITY,
+    DAY
+  }
+
+  private static Table newPartitionedTable(Partitioning partitioning) {
+    PartitionSpec.Builder spec = PartitionSpec.builderFor(PARTITIONED_SCHEMA);
+    return new HadoopTables(new Configuration())
+        .create(
+            PARTITIONED_SCHEMA,
+            partitioning == Partitioning.IDENTITY
+                ? spec.identity("level").build()
+                : spec.day("ts").build(),
+            Collections.singletonMap(TableProperties.FORMAT_VERSION, "3"),
+            tempDir.resolve("table_" + UUID.randomUUID()).toUri().toString());
+  }
+
+  /** The i-th partition: level {@code level<i>}, or the i-th day of 2026. */
+  private static List<PartitionValue> partition(Partitioning partitioning, int i) {
+    boolean identity = partitioning == Partitioning.IDENTITY;
+    InternalField sourceField =
+        INTERNAL_PARTITIONED_SCHEMA.getFields().stream()
+            .filter(field -> field.getName().equals(identity ? "level" : "ts"))
+            .findFirst()
+            .get();
+    return Collections.singletonList(
+        PartitionValue.builder()
+            .partitionField(
+                InternalPartitionField.builder()
+                    .sourceField(sourceField)
+                    .transformType(
+                        identity ? PartitionTransformType.VALUE : PartitionTransformType.DAY)
+                    .build())
+            .range(
+                Range.scalar(
+                    identity
+                        ? "level" + i
+                        : Instant.parse("2026-01-01T00:00:00Z")
+                            .plus(Duration.ofDays(i))
+                            .toEpochMilli()))
+            .build());
+  }
+
+  /**
+   * A table with one data file and one deletion vector in each of the given number of partitions,
+   * each added by its own commit, so every partition has its own data and delete manifest.
+   */
+  private List<InternalDataFile> filesWithDeletionVectors(
+      Table table, Partitioning partitioning, int partitions) {
+    List<InternalDataFile> files = new ArrayList<>();
+    for (int i = 0; i < partitions; i++) {
+      InternalDataFile file = dataFile(table, "f" + i, partition(partitioning, i));
+      files.add(file);
+      apply(
+          table,
+          Collections.singletonList(file),
+          Collections.emptyList(),
+          positions(file, 0L),
+          Collections.singletonList(partition(partitioning, i)),
+          false);
+    }
+    return files;
+  }
+
+  /** The same table, reporting the scans planned on it. */
+  private static Table reportingScans(Table table, List<ScanReport> scans) {
+    return new BaseTable(
+        ((HasTableOperations) table).operations(),
+        table.name(),
+        report -> {
+          if (report instanceof ScanReport) {
+            scans.add((ScanReport) report);
+          }
+        });
   }
 
   private void apply(
@@ -99,12 +201,23 @@ class TestIcebergDeletionVectorSync {
       List<InternalDataFile> removed,
       Map<String, List<Long>> deletedPositions,
       boolean replaceDeletionVectors) {
+    apply(table, added, removed, deletedPositions, Collections.emptyList(), replaceDeletionVectors);
+  }
+
+  private void apply(
+      Table table,
+      List<InternalDataFile> added,
+      List<InternalDataFile> removed,
+      Map<String, List<Long>> deletedPositions,
+      List<List<PartitionValue>> partitionsOfDataFiles,
+      boolean replaceDeletionVectors) {
     Transaction transaction = table.newTransaction();
     sync.applyRowDelta(
         table,
         transaction,
         InternalFilesDiff.builder().filesAdded(added).filesRemoved(removed).build(),
         deletedPositions,
+        partitionsOfDataFiles,
         replaceDeletionVectors,
         transaction.table().schema(),
         transaction.table().spec(),
@@ -261,6 +374,7 @@ class TestIcebergDeletionVectorSync {
             .filesRemoved(Collections.emptyList())
             .build(),
         positions(a, 1L),
+        Collections.emptyList(),
         false,
         transaction.table().schema(),
         transaction.table().spec(),
@@ -272,6 +386,59 @@ class TestIcebergDeletionVectorSync {
     assertTrue(missing.getMessage().contains("missing data files"), missing.getMessage());
     table.refresh();
     assertEquals(Collections.emptyMap(), deletedPositions(table));
+  }
+
+  @ParameterizedTest
+  @EnumSource(Partitioning.class)
+  void onlyTheManifestsOfTheTouchedPartitionAreScanned(Partitioning partitioning) {
+    Table table = newPartitionedTable(partitioning);
+    List<InternalDataFile> files = filesWithDeletionVectors(table, partitioning, 8);
+
+    List<ScanReport> scans = new ArrayList<>();
+    apply(
+        reportingScans(table, scans),
+        Collections.emptyList(),
+        Collections.emptyList(),
+        positions(files.get(3), 5L),
+        Collections.singletonList(partition(partitioning, 3)),
+        false);
+    table.refresh();
+
+    Map<String, Set<Long>> expected = new TreeMap<>();
+    for (int i = 0; i < 8; i++) {
+      expected.put("f" + i, new TreeSet<>(i == 3 ? Arrays.asList(0L, 5L) : Arrays.asList(0L)));
+    }
+    assertEquals(expected, deletedPositions(table));
+    assertEquals(1, scans.size());
+    ScanMetricsResult scan = scans.get(0).scanMetrics();
+    assertEquals(8, scan.totalDataManifests().value());
+    assertEquals(1, scan.scannedDataManifests().value());
+    assertEquals(1, scan.scannedDeleteManifests().value());
+    assertEquals(1, scan.resultDataFiles().value());
+    assertEquals(1, scan.resultDeleteFiles().value());
+  }
+
+  @Test
+  void aDataFileOutsideTheGivenPartitionsIsLookedUpInTheWholeTable() {
+    Table table = newPartitionedTable(Partitioning.IDENTITY);
+    List<InternalDataFile> files = filesWithDeletionVectors(table, Partitioning.IDENTITY, 3);
+
+    List<ScanReport> scans = new ArrayList<>();
+    apply(
+        reportingScans(table, scans),
+        Collections.emptyList(),
+        Collections.emptyList(),
+        positions(files.get(2), 5L),
+        Collections.singletonList(partition(Partitioning.IDENTITY, 0)),
+        false);
+    table.refresh();
+
+    assertEquals(
+        expected("f0", Arrays.asList(0L), "f1", Arrays.asList(0L), "f2", Arrays.asList(0L, 5L)),
+        deletedPositions(table));
+    assertEquals(2, scans.size());
+    assertEquals(1, scans.get(0).scanMetrics().scannedDataManifests().value());
+    assertEquals(3, scans.get(1).scanMetrics().scannedDataManifests().value());
   }
 
   @Test

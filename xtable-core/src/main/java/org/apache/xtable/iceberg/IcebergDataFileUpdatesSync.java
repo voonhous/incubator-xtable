@@ -39,6 +39,7 @@ import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.OverwriteFiles;
+import org.apache.iceberg.PartitionField;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.RowDelta;
 import org.apache.iceberg.Schema;
@@ -49,11 +50,15 @@ import org.apache.iceberg.Transaction;
 import org.apache.iceberg.deletes.BaseDVFileWriter;
 import org.apache.iceberg.deletes.DVFileWriter;
 import org.apache.iceberg.deletes.PositionDeleteIndex;
+import org.apache.iceberg.expressions.Expression;
+import org.apache.iceberg.expressions.Expressions;
+import org.apache.iceberg.expressions.UnboundTerm;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.IOUtil;
 import org.apache.iceberg.io.OutputFileFactory;
 import org.apache.iceberg.io.SeekableInputStream;
+import org.apache.iceberg.transforms.Transform;
 import org.apache.iceberg.util.ContentFileUtil;
 
 import org.apache.xtable.exception.NotSupportedException;
@@ -61,6 +66,7 @@ import org.apache.xtable.exception.ReadException;
 import org.apache.xtable.exception.UpdateException;
 import org.apache.xtable.model.InternalTable;
 import org.apache.xtable.model.metadata.TableSyncMetadata;
+import org.apache.xtable.model.stat.PartitionValue;
 import org.apache.xtable.model.storage.FilesDiff;
 import org.apache.xtable.model.storage.InternalDataFile;
 import org.apache.xtable.model.storage.InternalFile;
@@ -146,6 +152,8 @@ public class IcebergDataFileUpdatesSync {
    *
    * @param deletedPositionsByDataFile row positions deleted from data files, keyed by the path the
    *     data file is recorded under
+   * @param partitionsOfDataFiles the partitions holding those data files; the lookup of their
+   *     current deletion vectors reads only the manifests of these partitions
    * @param replaceDeletionVectors when true the positions are everything deleted from the file and
    *     replace its current deletion vector, an empty collection leaving the file without one; when
    *     false they are merged into the file's current deletion vector
@@ -155,6 +163,7 @@ public class IcebergDataFileUpdatesSync {
       Transaction transaction,
       InternalFilesDiff internalFilesDiff,
       Map<String, ? extends Collection<Long>> deletedPositionsByDataFile,
+      Collection<List<PartitionValue>> partitionsOfDataFiles,
       boolean replaceDeletionVectors,
       Schema schema,
       PartitionSpec partitionSpec,
@@ -184,6 +193,7 @@ public class IcebergDataFileUpdatesSync {
           table,
           rowDelta,
           deletedPositionsByDataFile,
+          partitionFilter(partitionSpec, schema, partitionsOfDataFiles),
           replaceDeletionVectors,
           filesAdded,
           filesRemoved,
@@ -197,6 +207,7 @@ public class IcebergDataFileUpdatesSync {
       Table table,
       RowDelta rowDelta,
       Map<String, ? extends Collection<Long>> deletedPositionsByDataFile,
+      Expression partitionFilter,
       boolean replaceDeletionVectors,
       Map<String, DataFile> filesAdded,
       Set<String> filesRemoved,
@@ -209,12 +220,8 @@ public class IcebergDataFileUpdatesSync {
                   + " %d",
               table.name(), formatVersion));
     }
-    Map<String, FileScanTask> liveFiles = new HashMap<>();
-    try (CloseableIterable<FileScanTask> tasks = table.newScan().planFiles()) {
-      tasks.forEach(task -> liveFiles.put(task.file().location(), task));
-    } catch (IOException e) {
-      throw new ReadException("Failed to iterate through Iceberg data files", e);
-    }
+    Map<String, FileScanTask> liveFiles =
+        liveFiles(table, deletedPositionsByDataFile.keySet(), filesAdded.keySet(), partitionFilter);
     List<String> liveFilesWithNewDeletionVectors = new ArrayList<>();
     OutputFileFactory fileFactory =
         OutputFileFactory.builderFor(table, 1, 1).format(FileFormat.PUFFIN).build();
@@ -259,6 +266,80 @@ public class IcebergDataFileUpdatesSync {
     written.deleteFiles().forEach(rowDelta::addDeletes);
     written.rewrittenDeleteFiles().forEach(rowDelta::removeDeletes);
     rowDelta.validateDataFilesExist(liveFilesWithNewDeletionVectors);
+  }
+
+  /**
+   * The live data files among the given paths, with the delete files Iceberg applies to them. The
+   * scan is limited to the partition filter; a path that it does not find and that the commit does
+   * not add is looked up in the whole table, so the partitions change the cost but never the
+   * result.
+   */
+  private static Map<String, FileScanTask> liveFiles(
+      Table table, Set<String> paths, Set<String> filesAdded, Expression partitionFilter) {
+    Map<String, FileScanTask> liveFiles = scanLiveFiles(table, paths, partitionFilter);
+    if (partitionFilter.op() != Expression.Operation.TRUE
+        && paths.stream()
+            .anyMatch(path -> !liveFiles.containsKey(path) && !filesAdded.contains(path))) {
+      return scanLiveFiles(table, paths, Expressions.alwaysTrue());
+    }
+    return liveFiles;
+  }
+
+  private static Map<String, FileScanTask> scanLiveFiles(
+      Table table, Set<String> paths, Expression partitionFilter) {
+    Map<String, FileScanTask> liveFiles = new HashMap<>();
+    try (CloseableIterable<FileScanTask> tasks =
+        table.newScan().filter(partitionFilter).planFiles()) {
+      for (FileScanTask task : tasks) {
+        if (paths.contains(task.file().location())) {
+          liveFiles.put(task.file().location(), task);
+        }
+      }
+    } catch (IOException e) {
+      throw new ReadException("Failed to iterate through Iceberg data files", e);
+    }
+    return liveFiles;
+  }
+
+  /**
+   * A row filter that matches exactly the rows of the given partitions of the spec, which a scan
+   * projects onto the partition summaries of each manifest to skip the manifests of other
+   * partitions. Without a partitioned spec or partitions it matches everything.
+   */
+  private Expression partitionFilter(
+      PartitionSpec spec, Schema schema, Collection<List<PartitionValue>> partitions) {
+    if (!spec.isPartitioned() || partitions.isEmpty()) {
+      return Expressions.alwaysTrue();
+    }
+    Expression filter = Expressions.alwaysFalse();
+    for (List<PartitionValue> partitionValues : partitions) {
+      StructLike partition = partitionValueConverter.toIceberg(spec, schema, partitionValues);
+      if (partition == null) {
+        return Expressions.alwaysTrue();
+      }
+      Expression partitionMatch = Expressions.alwaysTrue();
+      for (int i = 0; i < spec.fields().size(); i++) {
+        PartitionField field = spec.fields().get(i);
+        if (field.transform().isVoid()) {
+          continue;
+        }
+        UnboundTerm<Object> term = partitionTerm(schema.findColumnName(field.sourceId()), field);
+        Object value = partition.get(i, Object.class);
+        partitionMatch =
+            Expressions.and(
+                partitionMatch,
+                value == null ? Expressions.isNull(term) : Expressions.equal(term, value));
+      }
+      filter = Expressions.or(filter, partitionMatch);
+    }
+    return filter;
+  }
+
+  @SuppressWarnings("unchecked")
+  private static UnboundTerm<Object> partitionTerm(String sourceColumn, PartitionField field) {
+    return field.transform().isIdentity()
+        ? Expressions.ref(sourceColumn)
+        : Expressions.transform(sourceColumn, (Transform<?, Object>) field.transform());
   }
 
   /**

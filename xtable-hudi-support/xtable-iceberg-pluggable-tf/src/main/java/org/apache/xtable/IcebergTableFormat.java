@@ -22,9 +22,11 @@ import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -42,6 +44,7 @@ import org.apache.hudi.common.config.HoodieConfig;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.engine.HoodieEngineContext;
+import org.apache.hudi.common.fs.FSUtils;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.table.HoodieTableConfig;
@@ -57,6 +60,7 @@ import org.apache.hudi.config.HoodieArchivalConfig;
 import org.apache.hudi.keygen.constant.KeyGeneratorType;
 import org.apache.hudi.metadata.HoodieTableMetadata;
 import org.apache.hudi.metadata.TableMetadataFactory;
+import org.apache.hudi.storage.StoragePath;
 
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.Table;
@@ -81,8 +85,11 @@ import org.apache.xtable.iceberg.IcebergTableManager;
 import org.apache.xtable.metadata.IcebergMetadataFactory;
 import org.apache.xtable.model.IncrementalTableChanges;
 import org.apache.xtable.model.InternalTable;
+import org.apache.xtable.model.TableChange;
 import org.apache.xtable.model.metadata.TableSyncMetadata;
+import org.apache.xtable.model.schema.InternalPartitionField;
 import org.apache.xtable.model.schema.PartitionTransformType;
+import org.apache.xtable.model.stat.PartitionValue;
 import org.apache.xtable.model.storage.DataLayoutStrategy;
 import org.apache.xtable.model.sync.SyncResult;
 import org.apache.xtable.model.sync.SyncStatusCode;
@@ -455,7 +462,22 @@ public class IcebergTableFormat implements HoodieTableFormat {
       boolean replaceDeletionVectors) {
     IcebergConversionTarget target = getIcebergConversionTarget(metaClient);
     if (deletedPositionsByBaseFile != null) {
-      target.stageDeletionVectors(deletedPositionsByBaseFile, replaceDeletionVectors);
+      List<TableChange> tableChanges = new ArrayList<>();
+      changes.getTableChanges().forEachRemaining(tableChanges::add);
+      Set<List<PartitionValue>> partitions = new LinkedHashSet<>();
+      for (TableChange change : tableChanges) {
+        partitions.addAll(
+            partitionsOf(
+                metaClient,
+                change.getTableAsOfChange().getPartitioningFields(),
+                deletedPositionsByBaseFile.keySet()));
+      }
+      target.stageDeletionVectors(deletedPositionsByBaseFile, partitions, replaceDeletionVectors);
+      changes =
+          IncrementalTableChanges.builder()
+              .tableChanges(tableChanges.iterator())
+              .pendingCommits(changes.getPendingCommits())
+              .build();
     }
     TableSyncMetadata tableSyncMetadata =
         target
@@ -610,10 +632,8 @@ public class IcebergTableFormat implements HoodieTableFormat {
     // The Hadoop configuration can also set the format version, which init does not see.
     requireDeletionVectorsForMergeOnRead(
         metaClient.getTableConfig(), IcebergFormatConfig.of(metaClient));
-    String partitionSpec = partitionFieldSpec(metaClient.getTableConfig());
-    final PathBasedPartitionSpecExtractor sourcePartitionSpecExtractor =
-        HudiSourceConfig.fromPartitionFieldSpecConfig(partitionSpec)
-            .loadSourcePartitionSpecExtractor();
+    PathBasedPartitionSpecExtractor sourcePartitionSpecExtractor =
+        sourcePartitionSpecExtractor(metaClient.getTableConfig());
     return new HudiIncrementalTableChangeExtractor(
         metaClient,
         new HudiTableExtractor(new HudiSchemaExtractor(), sourcePartitionSpecExtractor),
@@ -623,6 +643,33 @@ public class IcebergTableFormat implements HoodieTableFormat {
                 sourcePartitionSpecExtractor.getPathToPartitionFieldFormat()),
             new HudiFileStatsExtractor(metaClient),
             viewManager));
+  }
+
+  private static PathBasedPartitionSpecExtractor sourcePartitionSpecExtractor(
+      HoodieTableConfig tableConfig) {
+    return HudiSourceConfig.fromPartitionFieldSpecConfig(partitionFieldSpec(tableConfig))
+        .loadSourcePartitionSpecExtractor();
+  }
+
+  /** The partition values of the partitions holding the given base files. */
+  private static Set<List<PartitionValue>> partitionsOf(
+      HoodieTableMetaClient metaClient,
+      List<InternalPartitionField> partitionFields,
+      Collection<String> baseFiles) {
+    PathBasedPartitionValuesExtractor partitionValuesExtractor =
+        new PathBasedPartitionValuesExtractor(
+            sourcePartitionSpecExtractor(metaClient.getTableConfig())
+                .getPathToPartitionFieldFormat());
+    return baseFiles.stream()
+        .map(
+            baseFile ->
+                FSUtils.getRelativePartitionPath(
+                    metaClient.getBasePath(), new StoragePath(baseFile).getParent()))
+        .distinct()
+        .map(
+            partitionPath ->
+                partitionValuesExtractor.extractPartitionValues(partitionFields, partitionPath))
+        .collect(Collectors.toCollection(LinkedHashSet::new));
   }
 
   private IcebergConversionTarget getIcebergConversionTarget(HoodieTableMetaClient metaClient) {
