@@ -390,11 +390,8 @@ class HudiPositionalDeleteExtractor {
         UPDATES_AS_DELETES_AND_INSERTS);
   }
 
-  /** The spelling the base file is recorded under in Iceberg, see {@code HudiDataFileExtractor}. */
   private String qualifiedPath(HoodieBaseFile baseFile) {
-    return new StoragePath(baseFile.getPath())
-        .makeQualified(metaClient.getStorage().getUri())
-        .toString();
+    return IcebergTableFormat.qualifiedPath(metaClient, baseFile);
   }
 
   /**

@@ -39,12 +39,14 @@ import org.apache.hadoop.conf.Configuration;
 
 import org.apache.hudi.avro.model.HoodieCleanMetadata;
 import org.apache.hudi.avro.model.HoodieRollbackMetadata;
+import org.apache.hudi.common.FormatMetaColumn;
 import org.apache.hudi.common.HoodieTableFormat;
 import org.apache.hudi.common.config.HoodieConfig;
 import org.apache.hudi.common.config.HoodieMetadataConfig;
 import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.fs.FSUtils;
+import org.apache.hudi.common.model.HoodieBaseFile;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.table.HoodieTableConfig;
@@ -108,6 +110,9 @@ public class IcebergTableFormat implements HoodieTableFormat {
 
   private transient TableFormatSync tableFormatSync;
 
+  /** Whether rewritten base files keep the Iceberg row lineage, see {@link IcebergRowLineage}. */
+  private boolean rowLineage;
+
   public IcebergTableFormat() {}
 
   /**
@@ -119,8 +124,20 @@ public class IcebergTableFormat implements HoodieTableFormat {
   public void init(Properties properties) {
     HoodieConfig tableConfig = new HoodieConfig(TypedProperties.copy(properties));
     requireTableVersionEightOrLater(tableConfig);
-    requireDeletionVectorsForMergeOnRead(tableConfig, IcebergFormatConfig.of(properties, null));
+    IcebergFormatConfig formatConfig = IcebergFormatConfig.of(properties, null);
+    requireDeletionVectorsForMergeOnRead(tableConfig, formatConfig);
+    this.rowLineage = formatConfig.getFormatVersion() >= 3;
     this.tableFormatSync = TableFormatSync.getInstance();
+  }
+
+  /**
+   * At format version 3 the row lineage columns, which Hudi then stores in every base file it
+   * rewrites, see {@link IcebergRowLineage}. The version is the one the table config sets, as that
+   * is all a table format sees here; when the Iceberg table is at version 2 the columns stay null.
+   */
+  @Override
+  public List<FormatMetaColumn> getFormatMetaColumns() {
+    return rowLineage ? IcebergRowLineage.columns() : Collections.emptyList();
   }
 
   @Override
@@ -135,6 +152,8 @@ public class IcebergTableFormat implements HoodieTableFormat {
       HoodieEngineContext engineContext,
       HoodieTableMetaClient metaClient,
       FileSystemViewManager viewManager) {
+    IcebergRowLineage.requireRowLineageInRewrittenBaseFiles(
+        commitMetadata, completedInstant, engineContext, metaClient, rowLineage);
     HudiIncrementalTableChangeExtractor hudiTableExtractor =
         getHudiTableExtractor(metaClient, viewManager);
     IncrementalTableChanges changes =
@@ -380,7 +399,7 @@ public class IcebergTableFormat implements HoodieTableFormat {
             metaClient);
   }
 
-  private static Table icebergTable(HoodieTableMetaClient metaClient) {
+  static Table icebergTable(HoodieTableMetaClient metaClient) {
     return IcebergFormatConfig.of(metaClient)
         .getTable(
             IcebergTableManager.of((Configuration) metaClient.getStorageConf().unwrap()),
@@ -645,10 +664,20 @@ public class IcebergTableFormat implements HoodieTableFormat {
             viewManager));
   }
 
-  private static PathBasedPartitionSpecExtractor sourcePartitionSpecExtractor(
+  static PathBasedPartitionSpecExtractor sourcePartitionSpecExtractor(
       HoodieTableConfig tableConfig) {
     return HudiSourceConfig.fromPartitionFieldSpecConfig(partitionFieldSpec(tableConfig))
         .loadSourcePartitionSpecExtractor();
+  }
+
+  /**
+   * The spelling of a base file's path in Iceberg, qualified with the storage scheme and authority
+   * the way {@code HudiDataFileExtractor} adds the file.
+   */
+  static String qualifiedPath(HoodieTableMetaClient metaClient, HoodieBaseFile baseFile) {
+    return new StoragePath(baseFile.getPath())
+        .makeQualified(metaClient.getStorage().getUri())
+        .toString();
   }
 
   /** The partition values of the partitions holding the given base files. */
