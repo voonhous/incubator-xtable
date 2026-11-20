@@ -239,6 +239,7 @@ class TestIcebergDeletionVectorSync {
         deletedPositions,
         partitionsOfDataFiles,
         replaceDeletionVectors,
+        false,
         transaction.table().schema(),
         transaction.table().spec(),
         TableSyncMetadata.of(Instant.now(), Collections.emptyList()));
@@ -395,6 +396,7 @@ class TestIcebergDeletionVectorSync {
             .build(),
         positions(a, 1L),
         Collections.emptyList(),
+        false,
         false,
         transaction.table().schema(),
         transaction.table().spec(),

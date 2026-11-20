@@ -37,6 +37,7 @@ import lombok.extern.log4j.Log4j2;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.DeleteFile;
+import org.apache.iceberg.DeleteFiles;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.HasTableOperations;
@@ -105,12 +106,22 @@ public class IcebergDataFileUpdatesSync {
         transaction, diff.getFilesAdded(), diff.getFilesRemoved(), schema, partitionSpec, metadata);
   }
 
+  /**
+   * @param deleteOperation whether the source commit is a delete. Iceberg names a snapshot after
+   *     the statement that wrote it, so a delete that matched no rows is published as an empty
+   *     delete; any other diff is labelled by the files it adds and removes.
+   */
   public void applyDiff(
       Transaction transaction,
       InternalFilesDiff internalFilesDiff,
+      boolean deleteOperation,
       Schema schema,
       PartitionSpec partitionSpec,
       TableSyncMetadata metadata) {
+    if (deleteOperation && changesNoDataFiles(internalFilesDiff)) {
+      commitEmptyDelete(transaction, metadata);
+      return;
+    }
 
     Collection<DataFile> filesRemoved =
         internalFilesDiff.dataFilesRemoved().stream()
@@ -143,6 +154,21 @@ public class IcebergDataFileUpdatesSync {
     overwriteFiles.commit();
   }
 
+  private static boolean changesNoDataFiles(InternalFilesDiff internalFilesDiff) {
+    return internalFilesDiff.dataFilesAdded().isEmpty()
+        && internalFilesDiff.dataFilesRemoved().isEmpty();
+  }
+
+  /**
+   * An overwrite or row delta that changes nothing is labelled an overwrite, where Iceberg's own
+   * writer labels a delete that matched no rows a delete.
+   */
+  private static void commitEmptyDelete(Transaction transaction, TableSyncMetadata metadata) {
+    DeleteFiles deleteFiles = transaction.newDelete();
+    deleteFiles.set(TableSyncMetadata.XTABLE_METADATA, metadata.toJson());
+    deleteFiles.commit();
+  }
+
   /**
    * Commits a files diff together with deletion vectors as one row delta, so that readers never see
    * the added rows without the deletes that belong to them.
@@ -159,6 +185,7 @@ public class IcebergDataFileUpdatesSync {
    * @param replaceDeletionVectors when true the positions are everything deleted from the file and
    *     replace its current deletion vector, an empty collection leaving the file without one; when
    *     false they are merged into the file's current deletion vector
+   * @param deleteOperation whether the source commit is a delete, see {@link #applyDiff}
    * @return the deletion vector files written for the row delta, which no snapshot references until
    *     the transaction commits; when the row delta fails they are deleted before it throws
    */
@@ -169,9 +196,16 @@ public class IcebergDataFileUpdatesSync {
       Map<String, ? extends Collection<Long>> deletedPositionsByDataFile,
       Collection<List<PartitionValue>> partitionsOfDataFiles,
       boolean replaceDeletionVectors,
+      boolean deleteOperation,
       Schema schema,
       PartitionSpec partitionSpec,
       TableSyncMetadata metadata) {
+    if (deleteOperation
+        && changesNoDataFiles(internalFilesDiff)
+        && deletedPositionsByDataFile.isEmpty()) {
+      commitEmptyDelete(transaction, metadata);
+      return Collections.emptySet();
+    }
     RowDelta rowDelta = transaction.newRowDelta();
     Snapshot currentSnapshot = transaction.table().currentSnapshot();
     if (currentSnapshot != null) {

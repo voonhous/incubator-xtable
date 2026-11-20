@@ -49,6 +49,7 @@ import org.apache.hudi.common.fs.FSUtils;
 import org.apache.hudi.common.model.HoodieBaseFile;
 import org.apache.hudi.common.model.HoodieCommitMetadata;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.HoodieTableVersion;
@@ -158,16 +159,13 @@ public class IcebergTableFormat implements HoodieTableFormat {
         getHudiTableExtractor(metaClient, viewManager);
     IncrementalTableChanges changes =
         hudiTableExtractor.extractTableChanges(commitMetadata, completedInstant);
-    if (isMergeOnRead(metaClient.getTableConfig())) {
-      completeInstant(
-          metaClient,
-          changes,
-          new HudiPositionalDeleteExtractor(metaClient, viewManager)
-              .positionsDeletedBy(commitMetadata, completedInstant),
-          false);
-    } else {
-      completeInstant(metaClient, changes);
-    }
+    boolean deleteOperation = WriteOperationType.isDelete(commitMetadata.getOperationType());
+    Map<String, Set<Long>> deletedPositionsByBaseFile =
+        isMergeOnRead(metaClient.getTableConfig())
+            ? new HudiPositionalDeleteExtractor(metaClient, viewManager)
+                .positionsDeletedBy(commitMetadata, completedInstant)
+            : null;
+    completeInstant(metaClient, changes, deletedPositionsByBaseFile, false, deleteOperation);
   }
 
   @Override
@@ -357,7 +355,8 @@ public class IcebergTableFormat implements HoodieTableFormat {
           new HudiPositionalDeleteExtractor(metaClient, viewManager)
               .positionsDeletedAfter(
                   rollbackMetadata, publishedCommitTimes, filesRemovedByRolledBackCommits),
-          true);
+          true,
+          false);
     } else {
       completeInstant(metaClient, changes);
     }
@@ -465,7 +464,7 @@ public class IcebergTableFormat implements HoodieTableFormat {
   }
 
   private void completeInstant(HoodieTableMetaClient metaClient, IncrementalTableChanges changes) {
-    completeInstant(metaClient, changes, null, false);
+    completeInstant(metaClient, changes, null, false, false);
   }
 
   /**
@@ -473,12 +472,15 @@ public class IcebergTableFormat implements HoodieTableFormat {
    *     vectors in the snapshot of the instant; null for an instant of a table without any
    * @param replaceDeletionVectors whether the positions replace the current deletion vector of each
    *     base file rather than being merged into it
+   * @param deleteOperation whether the instant is a Hudi delete, which Iceberg labels a delete even
+   *     when it matched no rows
    */
   private void completeInstant(
       HoodieTableMetaClient metaClient,
       IncrementalTableChanges changes,
       Map<String, Set<Long>> deletedPositionsByBaseFile,
-      boolean replaceDeletionVectors) {
+      boolean replaceDeletionVectors,
+      boolean deleteOperation) {
     IcebergConversionTarget target = getIcebergConversionTarget(metaClient);
     if (deletedPositionsByBaseFile != null) {
       List<TableChange> tableChanges = new ArrayList<>();
@@ -497,6 +499,9 @@ public class IcebergTableFormat implements HoodieTableFormat {
               .tableChanges(tableChanges.iterator())
               .pendingCommits(changes.getPendingCommits())
               .build();
+    }
+    if (deleteOperation) {
+      target.stageDeleteOperation();
     }
     TableSyncMetadata tableSyncMetadata =
         target
