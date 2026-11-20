@@ -289,31 +289,38 @@ public class IcebergActiveTimeline extends ActiveTimelineV2 {
   }
 
   /**
-   * The action a completed replacecommit has while pending: a clustering completes as a
-   * replacecommit, but its requested and inflight files carry the clustering action, and Hudi reads
-   * the clustering plan from the requested file named after the pending instant's action.
+   * The action a completed instant has while pending: a clustering completes as a replacecommit and
+   * a compaction as a commit, but their requested and inflight files carry the clustering or
+   * compaction action, and Hudi reads the plan from the requested file named after the pending
+   * instant's action. Shown as an ordinary commit, a compaction would also make the file system
+   * view hide the log files committed after it was scheduled.
    */
   private static String pendingAction(HoodieTableMetaClient metaClient, HoodieInstant instant) {
-    if (!HoodieTimeline.REPLACE_COMMIT_ACTION.equals(instant.getAction())) {
-      return instant.getAction();
+    if (HoodieTimeline.REPLACE_COMMIT_ACTION.equals(instant.getAction())
+        && hasPlan(metaClient, HoodieTimeline.CLUSTERING_ACTION, instant)) {
+      return HoodieTimeline.CLUSTERING_ACTION;
     }
-    HoodieInstant clusteringRequested =
+    if (HoodieTimeline.COMMIT_ACTION.equals(instant.getAction())
+        && hasPlan(metaClient, HoodieTimeline.COMPACTION_ACTION, instant)) {
+      return HoodieTimeline.COMPACTION_ACTION;
+    }
+    return instant.getAction();
+  }
+
+  private static boolean hasPlan(
+      HoodieTableMetaClient metaClient, String planAction, HoodieInstant instant) {
+    HoodieInstant requested =
         metaClient
             .getInstantGenerator()
-            .createNewInstant(
-                HoodieInstant.State.REQUESTED,
-                HoodieTimeline.CLUSTERING_ACTION,
-                instant.requestedTime());
-    StoragePath clusteringPlan =
+            .createNewInstant(HoodieInstant.State.REQUESTED, planAction, instant.requestedTime());
+    StoragePath plan =
         new StoragePath(
             metaClient.getTimelinePath(),
-            metaClient.getInstantFileNameGenerator().getFileName(clusteringRequested));
+            metaClient.getInstantFileNameGenerator().getFileName(requested));
     try {
-      return metaClient.getStorage().exists(clusteringPlan)
-          ? HoodieTimeline.CLUSTERING_ACTION
-          : instant.getAction();
+      return metaClient.getStorage().exists(plan);
     } catch (IOException e) {
-      throw new HoodieIOException("Unable to check the clustering plan of " + instant, e);
+      throw new HoodieIOException("Unable to check the " + planAction + " plan of " + instant, e);
     }
   }
 
