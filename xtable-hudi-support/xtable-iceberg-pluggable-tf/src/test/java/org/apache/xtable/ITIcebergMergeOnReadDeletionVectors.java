@@ -25,6 +25,7 @@ import static org.apache.xtable.MergeOnReadAssertions.UPDATES_AS_DELETES_AND_INS
 import static org.apache.xtable.MergeOnReadAssertions.assertIcebergMatchesHudi;
 import static org.apache.xtable.MergeOnReadAssertions.deletedKeysByDataFileInIceberg;
 import static org.apache.xtable.MergeOnReadAssertions.deletedRowCount;
+import static org.apache.xtable.MergeOnReadAssertions.deletionVectorFiles;
 import static org.apache.xtable.MergeOnReadAssertions.deletionVectorTable;
 import static org.apache.xtable.MergeOnReadAssertions.filesWithDeletes;
 import static org.apache.xtable.MergeOnReadAssertions.icebergRows;
@@ -303,6 +304,7 @@ class ITIcebergMergeOnReadDeletionVectors {
       table.upsertRecords(inserts.subList(0, 5), true);
       Map<String, Set<String>> beforeFailure = deletedKeysByDataFileInIceberg(spark, basePath);
       List<String> rowsBeforeFailure = icebergRows(spark, basePath);
+      Set<String> deletionVectorFilesBeforeFailure = deletionVectorFiles(basePath);
 
       // A read-only Iceberg metadata directory fails the publish after Hudi has completed the
       // deltacommit and after its deletion vectors were written.
@@ -322,6 +324,7 @@ class ITIcebergMergeOnReadDeletionVectors {
       }
       assertEquals(beforeFailure, deletedKeysByDataFileInIceberg(spark, basePath));
       assertEquals(rowsBeforeFailure, icebergRows(spark, basePath));
+      assertEquals(deletionVectorFilesBeforeFailure, deletionVectorFiles(basePath));
       assertIcebergMatchesHudi(spark, basePath);
 
       table.rollback(update);

@@ -21,6 +21,7 @@ package org.apache.xtable.iceberg;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -31,6 +32,7 @@ import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
 import lombok.AllArgsConstructor;
+import lombok.extern.log4j.Log4j2;
 
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
@@ -55,7 +57,9 @@ import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.UnboundTerm;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.DeleteWriteResult;
+import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.IOUtil;
+import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.io.OutputFileFactory;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.transforms.Transform;
@@ -73,6 +77,7 @@ import org.apache.xtable.model.storage.InternalFile;
 import org.apache.xtable.model.storage.InternalFilesDiff;
 import org.apache.xtable.model.storage.PartitionFileGroup;
 
+@Log4j2
 @AllArgsConstructor(staticName = "of")
 public class IcebergDataFileUpdatesSync {
   private final IcebergColumnStatsConverter columnStatsConverter;
@@ -157,8 +162,10 @@ public class IcebergDataFileUpdatesSync {
    * @param replaceDeletionVectors when true the positions are everything deleted from the file and
    *     replace its current deletion vector, an empty collection leaving the file without one; when
    *     false they are merged into the file's current deletion vector
+   * @return the deletion vector files written for the row delta, which no snapshot references until
+   *     the transaction commits; when the row delta fails they are deleted before it throws
    */
-  public void applyRowDelta(
+  public Set<String> applyRowDelta(
       Table table,
       Transaction transaction,
       InternalFilesDiff internalFilesDiff,
@@ -188,22 +195,48 @@ public class IcebergDataFileUpdatesSync {
       filesRemoved.add(dataFile.location());
       rowDelta.removeRows(dataFile);
     }
+    Set<String> deletionVectorFiles = Collections.emptySet();
     if (!deletedPositionsByDataFile.isEmpty()) {
-      addDeletionVectors(
-          table,
-          rowDelta,
-          deletedPositionsByDataFile,
-          partitionFilter(partitionSpec, schema, partitionsOfDataFiles),
-          replaceDeletionVectors,
-          filesAdded,
-          filesRemoved,
-          partitionSpec);
+      deletionVectorFiles =
+          addDeletionVectors(
+              table,
+              rowDelta,
+              deletedPositionsByDataFile,
+              partitionFilter(partitionSpec, schema, partitionsOfDataFiles),
+              replaceDeletionVectors,
+              filesAdded,
+              filesRemoved,
+              partitionSpec);
     }
-    rowDelta.set(TableSyncMetadata.XTABLE_METADATA, metadata.toJson());
-    rowDelta.commit();
+    try {
+      rowDelta.set(TableSyncMetadata.XTABLE_METADATA, metadata.toJson());
+      rowDelta.commit();
+    } catch (RuntimeException e) {
+      deleteUncommittedFiles(table.io(), deletionVectorFiles);
+      throw e;
+    }
+    return deletionVectorFiles;
   }
 
-  private void addDeletionVectors(
+  /**
+   * Deletes files written for a commit that failed. Each file is deleted if it exists, and a
+   * failure to delete one is logged rather than thrown, so that it does not hide why the commit
+   * failed.
+   */
+  static void deleteUncommittedFiles(FileIO io, Collection<String> files) {
+    for (String file : files) {
+      try {
+        if (io.newInputFile(file).exists()) {
+          io.deleteFile(file);
+        }
+      } catch (RuntimeException e) {
+        log.warn("Failed to delete file {} of a failed commit", file, e);
+      }
+    }
+  }
+
+  /** @return the deletion vector files written */
+  private Set<String> addDeletionVectors(
       Table table,
       RowDelta rowDelta,
       Map<String, ? extends Collection<Long>> deletedPositionsByDataFile,
@@ -223,12 +256,16 @@ public class IcebergDataFileUpdatesSync {
     Map<String, FileScanTask> liveFiles =
         liveFiles(table, deletedPositionsByDataFile.keySet(), filesAdded.keySet(), partitionFilter);
     List<String> liveFilesWithNewDeletionVectors = new ArrayList<>();
-    OutputFileFactory fileFactory =
-        OutputFileFactory.builderFor(table, 1, 1).format(FileFormat.PUFFIN).build();
+    OutputFile deletionVectorFile =
+        OutputFileFactory.builderFor(table, 1, 1)
+            .format(FileFormat.PUFFIN)
+            .build()
+            .newOutputFile()
+            .encryptingOutputFile();
     DeleteWriteResult written;
     try (DVFileWriter writer =
         new BaseDVFileWriter(
-            fileFactory,
+            () -> deletionVectorFile,
             path ->
                 replaceDeletionVectors
                     ? null
@@ -261,11 +298,19 @@ public class IcebergDataFileUpdatesSync {
       writer.close();
       written = writer.result();
     } catch (IOException e) {
+      deleteUncommittedFiles(table.io(), Collections.singleton(deletionVectorFile.location()));
       throw new UpdateException("Failed to write Iceberg deletion vectors", e);
+    } catch (RuntimeException e) {
+      // Closing the writer on the way out writes the vectors collected so far.
+      deleteUncommittedFiles(table.io(), Collections.singleton(deletionVectorFile.location()));
+      throw e;
     }
     written.deleteFiles().forEach(rowDelta::addDeletes);
     written.rewrittenDeleteFiles().forEach(rowDelta::removeDeletes);
     rowDelta.validateDataFilesExist(liveFilesWithNewDeletionVectors);
+    return written.deleteFiles().stream()
+        .map(DeleteFile::location)
+        .collect(Collectors.toCollection(HashSet::new));
   }
 
   /**

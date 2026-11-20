@@ -35,6 +35,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 
 import org.apache.iceberg.ExpireSnapshots;
+import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
@@ -44,6 +45,8 @@ import org.apache.iceberg.Transaction;
 import org.apache.iceberg.UpdateProperties;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.exceptions.CleanableFailure;
+import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.mapping.MappedField;
 import org.apache.iceberg.mapping.MappedFields;
@@ -87,6 +90,9 @@ public class IcebergConversionTarget implements ConversionTarget {
   private Collection<List<PartitionValue>> stagedPartitionsOfDataFiles;
 
   private boolean stagedPositionsReplaceDeletionVectors;
+
+  /** Deletion vector files the staged row delta wrote, which only its commit makes referenced. */
+  private Set<String> uncommittedDeletionVectorFiles = Collections.emptySet();
 
   public IcebergConversionTarget() {}
 
@@ -310,16 +316,17 @@ public class IcebergConversionTarget implements ConversionTarget {
   @Override
   public void syncFilesForDiff(InternalFilesDiff internalFilesDiff) {
     if (stagedDeletedPositions != null) {
-      dataFileUpdatesExtractor.applyRowDelta(
-          table,
-          transaction,
-          internalFilesDiff,
-          stagedDeletedPositions,
-          stagedPartitionsOfDataFiles,
-          stagedPositionsReplaceDeletionVectors,
-          transaction.table().schema(),
-          transaction.table().spec(),
-          tableSyncMetadata);
+      uncommittedDeletionVectorFiles =
+          dataFileUpdatesExtractor.applyRowDelta(
+              table,
+              transaction,
+              internalFilesDiff,
+              stagedDeletedPositions,
+              stagedPartitionsOfDataFiles,
+              stagedPositionsReplaceDeletionVectors,
+              transaction.table().schema(),
+              transaction.table().spec(),
+              tableSyncMetadata);
       return;
     }
     dataFileUpdatesExtractor.applyDiff(
@@ -332,16 +339,46 @@ public class IcebergConversionTarget implements ConversionTarget {
 
   @Override
   public void completeSync() {
-    if (!metadataRetention.isNegative()) {
-      transaction
-          .expireSnapshots()
-          .expireOlderThan(Instant.now().minus(metadataRetention).toEpochMilli())
-          .deleteWith(this::safeDelete)
-          .cleanExpiredFiles(true)
-          .commit();
+    try {
+      if (!metadataRetention.isNegative()) {
+        transaction
+            .expireSnapshots()
+            .expireOlderThan(Instant.now().minus(metadataRetention).toEpochMilli())
+            .deleteWith(this::safeDelete)
+            .cleanExpiredFiles(true)
+            .commit();
+      }
+      transaction.commitTransaction();
+    } catch (RuntimeException e) {
+      deleteUncommittedDeletionVectorFiles(e);
+      throw e;
     }
-    transaction.commitTransaction();
     resetTransactionState();
+  }
+
+  /**
+   * Deletes the deletion vector files of a sync whose commit failed, since no snapshot references
+   * them. They are kept when the commit may have landed, as Iceberg decides for its own metadata
+   * files: when the outcome is unknown, or when the catalog requires strict cleanup and the failure
+   * does not mark the commit as failed.
+   */
+  private void deleteUncommittedDeletionVectorFiles(RuntimeException commitFailure) {
+    if (uncommittedDeletionVectorFiles.isEmpty()) {
+      return;
+    }
+    boolean mayHaveCommitted =
+        commitFailure instanceof CommitStateUnknownException
+            || (((HasTableOperations) table).operations().requireStrictCleanup()
+                && !(commitFailure instanceof CleanableFailure));
+    if (mayHaveCommitted) {
+      log.warn(
+          "Keeping deletion vector files {} of table {}, since its commit may have landed",
+          uncommittedDeletionVectorFiles,
+          tableIdentifier);
+    } else {
+      IcebergDataFileUpdatesSync.deleteUncommittedFiles(table.io(), uncommittedDeletionVectorFiles);
+    }
+    uncommittedDeletionVectorFiles = Collections.emptySet();
   }
 
   /**
@@ -424,6 +461,7 @@ public class IcebergConversionTarget implements ConversionTarget {
     tableSyncMetadata = null;
     stagedDeletedPositions = null;
     stagedPartitionsOfDataFiles = null;
+    uncommittedDeletionVectorFiles = Collections.emptySet();
   }
 
   private void rollbackCorruptCommits() {

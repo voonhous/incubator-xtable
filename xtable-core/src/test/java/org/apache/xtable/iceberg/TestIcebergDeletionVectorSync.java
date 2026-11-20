@@ -19,21 +19,31 @@
 package org.apache.xtable.iceberg;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import java.net.URI;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import lombok.SneakyThrows;
 
@@ -41,7 +51,9 @@ import org.apache.hadoop.conf.Configuration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.FileScanTask;
@@ -49,16 +61,23 @@ import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.data.BaseDeleteLoader;
+import org.apache.iceberg.exceptions.CommitFailedException;
+import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.exceptions.ValidationException;
+import org.apache.iceberg.hadoop.HadoopFileIO;
+import org.apache.iceberg.hadoop.HadoopTableOperations;
 import org.apache.iceberg.hadoop.HadoopTables;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.metrics.ScanMetricsResult;
 import org.apache.iceberg.metrics.ScanReport;
 import org.apache.iceberg.types.Types;
+import org.apache.iceberg.util.LockManagers;
 
+import org.apache.xtable.conversion.TargetTable;
 import org.apache.xtable.exception.NotSupportedException;
 import org.apache.xtable.exception.UpdateException;
 import org.apache.xtable.model.metadata.TableSyncMetadata;
@@ -71,6 +90,7 @@ import org.apache.xtable.model.stat.Range;
 import org.apache.xtable.model.storage.FileFormat;
 import org.apache.xtable.model.storage.InternalDataFile;
 import org.apache.xtable.model.storage.InternalFilesDiff;
+import org.apache.xtable.model.storage.TableFormat;
 
 /**
  * A files diff with deleted positions is committed as one row delta that either lands whole or
@@ -439,6 +459,172 @@ class TestIcebergDeletionVectorSync {
     assertEquals(2, scans.size());
     assertEquals(1, scans.get(0).scanMetrics().scannedDataManifests().value());
     assertEquals(3, scans.get(1).scanMetrics().scannedDataManifests().value());
+  }
+
+  /** The deletion vector files under the table's location, committed or not. */
+  @SneakyThrows
+  private static Set<String> deletionVectorFiles(Table table) {
+    try (Stream<Path> files = Files.walk(Paths.get(URI.create(table.location())))) {
+      return files
+          .map(Path::toString)
+          .filter(name -> name.endsWith(".puffin"))
+          .collect(Collectors.toCollection(TreeSet::new));
+    }
+  }
+
+  /** A target that syncs to the given table, with no snapshot expiry at the end of a sync. */
+  private IcebergConversionTarget target(Table table) {
+    IcebergTableManager tableManager = mock(IcebergTableManager.class);
+    when(tableManager.tableExists(any(), any(), any())).thenReturn(true);
+    when(tableManager.getTable(any(), any(), any())).thenReturn(table);
+    return new IcebergConversionTarget(
+        TargetTable.builder()
+            .name("deletion_vectors")
+            .formatName(TableFormat.ICEBERG)
+            .basePath(table.location())
+            .metadataRetention(TargetTable.NO_METADATA_EXPIRY)
+            .build(),
+        new Configuration(),
+        IcebergSchemaExtractor.getInstance(),
+        IcebergSchemaSync.getInstance(),
+        IcebergPartitionSpecExtractor.getInstance(),
+        IcebergPartitionSpecSync.getInstance(),
+        sync,
+        tableManager);
+  }
+
+  /** Runs a sync of deleted positions through the target up to, not including, its commit. */
+  private static void stageSync(IcebergConversionTarget target, Map<String, List<Long>> positions) {
+    target.beginSync(null);
+    target.syncMetadata(TableSyncMetadata.of(Instant.now(), Collections.emptyList()));
+    target.stageDeletionVectors(positions, Collections.emptyList(), false);
+    target.syncFilesForDiff(
+        InternalFilesDiff.builder()
+            .filesAdded(Collections.emptyList())
+            .filesRemoved(Collections.emptyList())
+            .build());
+  }
+
+  /** Table operations whose commits fail while a failure is set. */
+  private static class FailingOperations extends HadoopTableOperations {
+    private final boolean strictCleanup;
+    private RuntimeException commitFailure;
+
+    FailingOperations(String location, boolean strictCleanup) {
+      super(
+          new org.apache.hadoop.fs.Path(location),
+          new HadoopFileIO(new Configuration()),
+          new Configuration(),
+          LockManagers.defaultLockManager());
+      this.strictCleanup = strictCleanup;
+    }
+
+    @Override
+    public void commit(TableMetadata base, TableMetadata metadata) {
+      if (commitFailure != null) {
+        throw commitFailure;
+      }
+      super.commit(base, metadata);
+    }
+
+    @Override
+    public boolean requireStrictCleanup() {
+      return strictCleanup;
+    }
+  }
+
+  @Test
+  void aRowDeltaThatFailsDeletesTheDeletionVectorFileItWrote() {
+    Table table = newTable(3);
+    InternalDataFile a = dataFile(table, "a");
+    InternalDataFile unknown = dataFile(table, "unknown");
+    apply(table, Arrays.asList(a), Collections.emptyList(), positions(a, 0L), false);
+    Set<String> committed = deletionVectorFiles(table);
+    assertEquals(1, committed.size());
+
+    // The file to remove is missing, which fails the row delta once the vectors are written.
+    assertThrows(
+        ValidationException.class,
+        () ->
+            apply(table, Collections.emptyList(), Arrays.asList(unknown), positions(a, 1L), false));
+    // A file that is not live fails it while the vectors are written, after one for a live file.
+    Map<String, List<Long>> liveThenNotLive = new LinkedHashMap<>();
+    liveThenNotLive.put(a.getPhysicalPath(), Arrays.asList(2L));
+    liveThenNotLive.put(unknown.getPhysicalPath(), Arrays.asList(1L));
+    assertThrows(
+        UpdateException.class,
+        () ->
+            apply(table, Collections.emptyList(), Collections.emptyList(), liveThenNotLive, false));
+
+    assertEquals(committed, deletionVectorFiles(table));
+    assertEquals(expected("a", Arrays.asList(0L)), deletedPositions(table));
+  }
+
+  @Test
+  void aCommitThatFailsValidationDeletesTheDeletionVectorFileOfItsSync() {
+    Table table = newTable(3);
+    InternalDataFile a = dataFile(table, "a");
+    InternalDataFile b = dataFile(table, "b");
+    apply(table, Arrays.asList(a, b), Collections.emptyList(), positions(b, 0L), false);
+    Set<String> committed = deletionVectorFiles(table);
+
+    IcebergConversionTarget target = target(table);
+    stageSync(target, positions(a, 1L));
+    assertEquals(committed.size() + 1, deletionVectorFiles(table).size());
+    Table concurrent = new HadoopTables(new Configuration()).load(table.location());
+    apply(concurrent, Collections.emptyList(), Arrays.asList(a), Collections.emptyMap(), false);
+    long concurrentSnapshot = concurrent.currentSnapshot().snapshotId();
+
+    ValidationException missing = assertThrows(ValidationException.class, target::completeSync);
+    assertTrue(missing.getMessage().contains("missing data files"), missing.getMessage());
+    assertEquals(committed, deletionVectorFiles(table));
+    table.refresh();
+    assertEquals(concurrentSnapshot, table.currentSnapshot().snapshotId());
+    assertEquals(expected("b", Arrays.asList(0L)), deletedPositions(table));
+  }
+
+  static Stream<Arguments> commitFailures() {
+    return Stream.of(
+        Arguments.of(new CommitFailedException("conflict"), false, false),
+        Arguments.of(new CommitFailedException("conflict"), true, false),
+        Arguments.of(new RuntimeException("connection reset"), false, false),
+        Arguments.of(new RuntimeException("connection reset"), true, true),
+        Arguments.of(
+            new CommitStateUnknownException(new RuntimeException("connection reset")),
+            false,
+            true));
+  }
+
+  @ParameterizedTest
+  @MethodSource("commitFailures")
+  void deletionVectorFilesAreKeptOnlyWhenTheFailedCommitMayHaveLanded(
+      RuntimeException failure, boolean strictCleanup, boolean mayHaveLanded) {
+    Table created = newTable(3);
+    created.updateProperties().set(TableProperties.COMMIT_NUM_RETRIES, "0").commit();
+    FailingOperations operations = new FailingOperations(created.location(), strictCleanup);
+    Table table = new BaseTable(operations, created.location());
+    InternalDataFile a = dataFile(table, "a");
+    apply(table, Arrays.asList(a), Collections.emptyList(), positions(a, 0L), false);
+    Set<String> committed = deletionVectorFiles(table);
+    long snapshot = table.currentSnapshot().snapshotId();
+
+    IcebergConversionTarget target = target(table);
+    stageSync(target, positions(a, 1L));
+    Set<String> written = deletionVectorFiles(table);
+    written.removeAll(committed);
+    assertEquals(1, written.size());
+    operations.commitFailure = failure;
+
+    assertSame(failure, assertThrows(RuntimeException.class, target::completeSync));
+    Set<String> expectedFiles = new TreeSet<>(committed);
+    if (mayHaveLanded) {
+      expectedFiles.addAll(written);
+    }
+    assertEquals(expectedFiles, deletionVectorFiles(table));
+    operations.commitFailure = null;
+    table.refresh();
+    assertEquals(snapshot, table.currentSnapshot().snapshotId());
+    assertEquals(expected("a", Arrays.asList(0L)), deletedPositions(table));
   }
 
   @Test
