@@ -499,7 +499,7 @@ public class ParquetSchemaExtractor {
                     field ->
                         fromInternalSchema(
                             field.getSchema(),
-                            SchemaUtils.getFullyQualifiedPath(field.getName(), currentPath)))
+                            SchemaUtils.getFullyQualifiedPath(currentPath, field.getName())))
                 .collect(CustomCollectors.toList(internalSchema.getFields().size()));
         type =
             Types.requiredGroup().addFields(fields.stream().toArray(Type[]::new)).named(fieldName);
