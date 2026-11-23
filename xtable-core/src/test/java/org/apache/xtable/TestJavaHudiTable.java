@@ -403,6 +403,30 @@ public class TestJavaHudiTable extends TestAbstractHudiTable {
     return updates;
   }
 
+  /** Writes the given records unchanged as an insert commit. */
+  public List<HoodieRecord<HoodieAvroPayload>> insertRecordsAsIs(
+      List<HoodieRecord<HoodieAvroPayload>> records, boolean checkForNoErrors) {
+    String commitInstant = getStartCommitInstant();
+    List<WriteStatus> result = writeClient.insert(copyRecords(records), commitInstant);
+    writeClient.commit(commitInstant, result);
+    if (checkForNoErrors) {
+      assertNoWriteErrors(result);
+    }
+    return records;
+  }
+
+  /** Writes the given records unchanged as an upsert commit (the merge write path). */
+  public List<HoodieRecord<HoodieAvroPayload>> upsertRecordsAsIs(
+      List<HoodieRecord<HoodieAvroPayload>> records, boolean checkForNoErrors) {
+    String commitInstant = getStartCommitInstant();
+    List<WriteStatus> result = writeClient.upsert(copyRecords(records), commitInstant);
+    writeClient.commit(commitInstant, result);
+    if (checkForNoErrors) {
+      assertNoWriteErrors(result);
+    }
+    return records;
+  }
+
   public List<HoodieKey> deleteRecords(
       List<HoodieRecord<HoodieAvroPayload>> records, boolean checkForNoErrors) {
     List<HoodieKey> deletes =
