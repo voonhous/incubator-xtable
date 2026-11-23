@@ -124,13 +124,14 @@ public class IcebergTableManager {
         TableOperations operations = ((BaseTable) tableWithEmptySchema).operations();
         TableMetadata tableMetadata = operations.current();
         TableMetadata.Builder builder = TableMetadata.buildFrom(tableMetadata);
-        builder.setCurrentSchema(schema, schema.highestFieldId());
-        builder.setDefaultPartitionSpec(partitionSpec);
         int formatVersion =
             hadoopConfiguration.getInt(ICEBERG_FORMAT_VERSION, DEFAULT_ICEBERG_FORMAT_VERSION);
         // Requesting the version the table was created with is a no-op; Iceberg rejects a lower
-        // one.
+        // one. It must precede setCurrentSchema: Iceberg validates the schema against the builder's
+        // format version, and types such as variant are only legal from v3.
         builder.upgradeFormatVersion(formatVersion);
+        builder.setCurrentSchema(schema, schema.highestFieldId());
+        builder.setDefaultPartitionSpec(partitionSpec);
         operations.commit(tableMetadata, builder.build());
         return getTable(catalogConfig, tableIdentifier, basePath);
       } catch (AlreadyExistsException ex) {
